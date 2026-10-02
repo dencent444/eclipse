@@ -12,6 +12,9 @@ add_library(eclipse_core STATIC
     src/core/block/block.c
     src/core/crypto/ml_dsa.c
     src/core/crypto/ml_dsa_math.c
+    src/core/encoding/base92.c
+    src/core/wallet/keypair.c
+    src/core/wallet/wallet.c
     src/core/log.c
 )
 target_include_directories(eclipse_core PUBLIC src/core)
@@ -38,6 +41,14 @@ if(BUILD_TESTING)
     add_executable(log_test tests/log_test.c)
     target_link_libraries(log_test PRIVATE eclipse_core)
     add_test(NAME log_test COMMAND log_test)
+
+    add_executable(base92_test tests/base92_test.c)
+    target_link_libraries(base92_test PRIVATE eclipse_core)
+    add_test(NAME base92_test COMMAND base92_test)
+
+    add_executable(wallet_test tests/wallet_test.c)
+    target_link_libraries(wallet_test PRIVATE eclipse_core)
+    add_test(NAME wallet_test COMMAND wallet_test)
 
     add_test(NAME cli_test COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:eclipse-cli>

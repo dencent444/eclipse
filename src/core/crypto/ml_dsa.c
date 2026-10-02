@@ -2,6 +2,7 @@
 #include "../log.h"
 
 #include <openssl/core_names.h>
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/params.h>
 
@@ -31,9 +32,9 @@ bool eclipse_ml_dsa_info(eclipse_ml_dsa_scheme_t scheme,
         return false;
     }
     switch (scheme) {
-    case ECLIPSE_ML_DSA_44: *info = (eclipse_ml_dsa_info_t){1312, 2420}; break;
-    case ECLIPSE_ML_DSA_65: *info = (eclipse_ml_dsa_info_t){1952, 3309}; break;
-    case ECLIPSE_ML_DSA_87: *info = (eclipse_ml_dsa_info_t){2592, 4627}; break;
+    case ECLIPSE_ML_DSA_44: *info = (eclipse_ml_dsa_info_t){1312, 2420, 2560}; break;
+    case ECLIPSE_ML_DSA_65: *info = (eclipse_ml_dsa_info_t){1952, 3309, 4032}; break;
+    case ECLIPSE_ML_DSA_87: *info = (eclipse_ml_dsa_info_t){2592, 4627, 4896}; break;
     default:
         ECLIPSE_LOG_INFO(4, "unknown ML-DSA scheme rejected");
         return false;
@@ -153,6 +154,34 @@ eclipse_error_t eclipse_ml_dsa_export_public(const eclipse_ml_dsa_key_t *key,
         return ECLIPSE_ERROR_CRYPTO_FAILURE;
     }
     ECLIPSE_LOG_INFO(5, "ML-DSA public key exported");
+    return ECLIPSE_SUCCESS;
+}
+
+eclipse_error_t eclipse_ml_dsa_export_private(const eclipse_ml_dsa_key_t *key,
+                                              uint8_t *bytes, size_t capacity)
+{
+    if (key == NULL || bytes == NULL) {
+        ECLIPSE_LOG_WARNING("ML-DSA private-key export rejected a null argument");
+        return ECLIPSE_ERROR_NULL_POINTER;
+    }
+    if (!key->has_private) {
+        ECLIPSE_LOG_WARNING("ML-DSA private-key export rejected a public-only key");
+        return ECLIPSE_ERROR_INVALID_ARGUMENT;
+    }
+    eclipse_ml_dsa_info_t info;
+    if (!eclipse_ml_dsa_info(key->scheme, &info))
+        return ECLIPSE_ERROR_INVALID_ARGUMENT;
+    if (capacity < info.private_key_size)
+        return ECLIPSE_ERROR_BUFFER_TOO_SMALL;
+    size_t written = 0;
+    if (EVP_PKEY_get_octet_string_param(key->pkey, OSSL_PKEY_PARAM_PRIV_KEY,
+                                        bytes, capacity, &written) <= 0 ||
+        written != info.private_key_size) {
+        OPENSSL_cleanse(bytes, info.private_key_size);
+        ECLIPSE_LOG_ERROR("ML-DSA private-key export failed");
+        return ECLIPSE_ERROR_CRYPTO_FAILURE;
+    }
+    ECLIPSE_LOG_INFO(4, "expanded ML-DSA private key exported");
     return ECLIPSE_SUCCESS;
 }
 

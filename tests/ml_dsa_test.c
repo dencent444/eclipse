@@ -1,5 +1,7 @@
 #include "crypto/ml_dsa.h"
 
+#include <openssl/crypto.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,8 +26,14 @@ static void exercise_scheme(eclipse_ml_dsa_scheme_t scheme)
     CHECK(eclipse_ml_dsa_generate(scheme, &other_key) == ECLIPSE_SUCCESS);
 
     uint8_t *public_bytes = malloc(info.public_key_size);
+    uint8_t *private_bytes = OPENSSL_malloc(info.private_key_size);
     uint8_t *signature = malloc(info.signature_size);
-    CHECK(public_bytes != NULL && signature != NULL);
+    CHECK(public_bytes != NULL && private_bytes != NULL && signature != NULL);
+    CHECK(eclipse_ml_dsa_export_private(private_key, private_bytes,
+                                        info.private_key_size - 1) ==
+          ECLIPSE_ERROR_BUFFER_TOO_SMALL);
+    CHECK(eclipse_ml_dsa_export_private(private_key, private_bytes,
+                                        info.private_key_size) == ECLIPSE_SUCCESS);
     CHECK(eclipse_ml_dsa_export_public(private_key, public_bytes,
                                        info.public_key_size - 1) ==
           ECLIPSE_ERROR_BUFFER_TOO_SMALL);
@@ -38,6 +46,9 @@ static void exercise_scheme(eclipse_ml_dsa_scheme_t scheme)
     CHECK(eclipse_ml_dsa_import_public(scheme, public_bytes,
                                        info.public_key_size, &public_key) ==
           ECLIPSE_SUCCESS);
+    CHECK(eclipse_ml_dsa_export_private(public_key, private_bytes,
+                                        info.private_key_size) ==
+          ECLIPSE_ERROR_INVALID_ARGUMENT);
 
     size_t written = 99;
     CHECK(eclipse_ml_dsa_sign(private_key, message, sizeof(message),
@@ -101,6 +112,7 @@ static void exercise_scheme(eclipse_ml_dsa_scheme_t scheme)
           ECLIPSE_SUCCESS && !valid);
 
     free(signature);
+    OPENSSL_clear_free(private_bytes, info.private_key_size);
     free(public_bytes);
     eclipse_ml_dsa_key_free(public_key);
     eclipse_ml_dsa_key_free(other_key);

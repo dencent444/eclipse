@@ -23,6 +23,7 @@ typedef struct eclipse_ml_dsa_key eclipse_ml_dsa_key_t;
 typedef struct {
     size_t public_key_size;
     size_t signature_size;
+    size_t private_key_size;
 } eclipse_ml_dsa_info_t;
 
 /* Returns false for an unknown scheme. Sizes are from FIPS 204. */
@@ -37,6 +38,11 @@ eclipse_error_t eclipse_ml_dsa_import_public(eclipse_ml_dsa_scheme_t scheme,
                                              eclipse_ml_dsa_key_t **out);
 eclipse_error_t eclipse_ml_dsa_export_public(const eclipse_ml_dsa_key_t *key,
                                              uint8_t *bytes, size_t capacity);
+
+/* Expanded FIPS 204 sk bytes, not a wallet master seed. These bytes are
+ * secret: the caller must protect and cleanse exported buffers. */
+eclipse_error_t eclipse_ml_dsa_export_private(const eclipse_ml_dsa_key_t *key,
+                                              uint8_t *bytes, size_t capacity);
 void eclipse_ml_dsa_key_free(eclipse_ml_dsa_key_t *key);
 
 /*

@@ -1,8 +1,8 @@
 # Eclipse Token (experimental)
 
-The repository currently contains a block-header serialization exercise and
-an isolated ML-DSA signature wrapper. There is no transaction or consensus
-integration yet.
+The repository currently contains a block-header serialization exercise,
+ML-DSA wrappers, and an in-memory wallet key skeleton. There is no transaction
+or consensus integration yet.
 
 ## Build and test
 
@@ -55,7 +55,7 @@ signatures.
 key generation, public-key import/export, message signing, and verification.
 OpenSSL implements the FIPS 204 cryptography; this module only handles the
 application-facing API and input checks. Generated private keys currently live
-in memory only. Wallet key storage and backup are future work.
+in memory only.
 
 `src/core/crypto/ml_dsa_math.h` contains small, readable reference utilities
 for arithmetic modulo q = 8,380,417 and polynomials modulo X^256 + 1. This is
@@ -68,6 +68,40 @@ caller provides a context string (up to 255 bytes) for domain separation.
 A future transaction protocol must specify the exact scheme, context, signed
 message bytes, and key format. The enum numbers in this module are local API
 values, not committed consensus identifiers.
+
+## Wallet key skeleton
+
+`src/core/wallet/keypair.h` contains a standalone `generate_keypair` wrapper.
+`src/core/wallet/wallet.h` builds one receive master and one spend master,
+plus 24 independently random child ML-DSA key pairs for each role. Each master
+signs its own child public keys with a context, role, scheme, and index; the
+wallet can verify these bindings. A separate public verifier rejects a wrong
+master, role, or index. Binding signatures are not part of the network key
+packet: publishing several under one master would reveal a link between keys.
+There is no wallet seed or deterministic child derivation. OpenSSL does use
+random input internally for each ML-DSA
+key-generation call, as described in its
+[ML-DSA documentation](https://docs.openssl.org/3.5/man7/EVP_PKEY-ML-DSA/).
+
+The two *master private keys* can be exported separately as Base92 strings
+through `eclipse_wallet_export_master_base92`. They are unencrypted secrets.
+The Base92 codec follows the published
+[thenoviceoof/base92 format](https://github.com/thenoviceoof/base92/blob/master/python/docs/encoding.md)
+and rejects noncanonical strings when decoding. The export packet is `EWMS`,
+version 1, role byte, scheme byte, two-byte big-endian private-key length,
+expanded FIPS 204 private bytes, and a 32-byte SHA-256 checksum. The checksum
+only detects accidental corruption; it does not protect against deliberate
+changes. No import, backup, or disk storage is implemented. Exporting a master
+does not preserve or recreate the 24 independent child private keys.
+
+For a future network transport, `eclipse_wallet_public_serialize` encodes one
+public key as `EWPK`, version 1, scheme byte, two-byte big-endian length, and
+the public key bytes. Its Base92 form carries the same packet. This is a
+provisional developer format, not a consensus object. It includes no role,
+index, master public key, or master signature, so it does not link the pools
+through this packet. There is no receive or spend transaction logic yet. The
+separation of master keys alone cannot enforce spending permissions; future
+consensus rules must define and check them.
 
 ## Logging
 
