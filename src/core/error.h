@@ -10,6 +10,7 @@ typedef enum {
     ECLIPSE_ERROR_OUT_OF_MEMORY,
     ECLIPSE_ERROR_BUFFER_TOO_SMALL,
     ECLIPSE_ERROR_CRYPTO_FAILURE,
+    ECLIPSE_ERROR_IO,
 } eclipse_error_t;
 
 #endif // ERROR_H

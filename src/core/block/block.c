@@ -1,4 +1,5 @@
 #include "block.h"
+#include "../log.h"
 
 #include <string.h>
 
@@ -35,10 +36,13 @@ eclipse_error_t eclipse_block_header_serialize(
     const eclipse_block_header_t *header, uint8_t *buffer, size_t buffer_size)
 {
     if (header == NULL || buffer == NULL) {
+        ECLIPSE_LOG_WARNING("header serialization rejected a null argument");
         return ECLIPSE_ERROR_NULL_POINTER;
     }
     /* Check the wire size before writing, so failures leave buffer untouched. */
     if (buffer_size < ECLIPSE_BLOCK_HEADER_SERIALIZED_SIZE) {
+        ECLIPSE_LOG_WARNING("header serialization buffer is too short: %zu bytes",
+                            buffer_size);
         return ECLIPSE_ERROR_INVALID_ARGUMENT;
     }
 
@@ -51,6 +55,7 @@ eclipse_error_t eclipse_block_header_serialize(
     /* Hashes are opaque byte arrays: do not apply integer byte swapping. */
     memcpy(buffer + 24, header->prev_block_hash, 32);
     memcpy(buffer + 56, header->merkle_root, 32);
+    ECLIPSE_LOG_INFO(5, "block header serialized");
     return ECLIPSE_SUCCESS;
 }
 
@@ -58,6 +63,7 @@ eclipse_error_t eclipse_block_header_deserialize(
     const uint8_t *buffer, eclipse_block_header_t *header, size_t buffer_size)
 {
     if (buffer == NULL || header == NULL) {
+        ECLIPSE_LOG_WARNING("header deserialization rejected a null argument");
         return ECLIPSE_ERROR_NULL_POINTER;
     }
     /*
@@ -65,6 +71,8 @@ eclipse_error_t eclipse_block_header_deserialize(
      * Validate before reading any bytes or changing the destination header.
      */
     if (buffer_size < ECLIPSE_BLOCK_HEADER_SERIALIZED_SIZE) {
+        ECLIPSE_LOG_INFO(4, "truncated block header rejected: %zu bytes",
+                         buffer_size);
         return ECLIPSE_ERROR_INVALID_ARGUMENT;
     }
 
@@ -75,5 +83,6 @@ eclipse_error_t eclipse_block_header_deserialize(
     header->nonce = read_big_endian(buffer + 16, 8);
     memcpy(header->prev_block_hash, buffer + 24, 32);
     memcpy(header->merkle_root, buffer + 56, 32);
+    ECLIPSE_LOG_INFO(5, "block header deserialized");
     return ECLIPSE_SUCCESS;
 }
