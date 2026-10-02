@@ -6,13 +6,48 @@ integration yet.
 
 ## Build and test
 
-Requires CMake and OpenSSL 3.5 or later with ML-DSA support.
+Requires CMake, ncurses development headers, and OpenSSL 3.5 or later with
+ML-DSA support.
 
 ```sh
 cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+## Developer CLI
+
+`eclipse-cli` only calls APIs already implemented in this repository. It does
+not create blocks, transactions, wallets, or network state. Run
+`./build/eclipse-cli` for the ncurses menu, or use `serialize` and
+`deserialize` without arguments for step-by-step ncurses input. Enter and
+Backspace edit fields; invalid fields stay on screen for correction and Esc
+cancels. Long results scroll with Up/Down and are
+also printed to stdout after leaving the interface.
+
+The argument forms work without a terminal and print only the result to
+stdout. Logs go to stderr by default:
+
+```sh
+HASH=$(printf '%064d' 0)
+./build/eclipse-cli serialize 1 2 3 4 "$HASH" "$HASH"
+./build/eclipse-cli "serialize(1,2,3,4,$HASH,$HASH)"
+HEX=$(./build/eclipse-cli --log-level 0 serialize 1 2 3 4 "$HASH" "$HASH")
+./build/eclipse-cli deserialize "$HEX"
+./build/eclipse-cli math mod -1
+./build/eclipse-cli ml-dsa self-test 44 "development message" "eclipse-cli"
+```
+
+The header has six fields in the order `version`, `timestamp`, `difficulty`,
+`nonce`, `prev_block_hash`, `merkle_root`. Numeric fields accept decimal or
+`0x`-prefixed hexadecimal; hashes require exactly 64 hex digits each.
+`deserialize` accepts exactly 176 hex digits. The ML-DSA self-test creates an
+ephemeral key, exports and imports its public key, signs the given message,
+then verifies it. It does not write a private key to disk.
+
+Use `--log-level 0..5` to control detail and `--log-file PATH` to append logs
+to a file. The CLI never logs raw arguments, header bytes, messages, keys, or
+signatures.
 
 ## ML-DSA module
 

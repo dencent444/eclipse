@@ -6,6 +6,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 find_package(OpenSSL 3.5 REQUIRED COMPONENTS Crypto)
 find_package(Threads REQUIRED)
+find_package(Curses REQUIRED)
 
 add_library(eclipse_core STATIC
     src/core/block/block.c
@@ -15,6 +16,10 @@ add_library(eclipse_core STATIC
 )
 target_include_directories(eclipse_core PUBLIC src/core)
 target_link_libraries(eclipse_core PUBLIC OpenSSL::Crypto Threads::Threads)
+
+add_executable(eclipse-cli src/cli/main.c)
+target_include_directories(eclipse-cli PRIVATE ${CURSES_INCLUDE_DIRS})
+target_link_libraries(eclipse-cli PRIVATE eclipse_core ${CURSES_LIBRARIES})
 
 include(CTest)
 if(BUILD_TESTING)
@@ -33,4 +38,9 @@ if(BUILD_TESTING)
     add_executable(log_test tests/log_test.c)
     target_link_libraries(log_test PRIVATE eclipse_core)
     add_test(NAME log_test COMMAND log_test)
+
+    add_test(NAME cli_test COMMAND ${CMAKE_COMMAND}
+        -DCLI=$<TARGET_FILE:eclipse-cli>
+        -DTEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.cmake)
 endif()
