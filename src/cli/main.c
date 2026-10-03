@@ -8,6 +8,7 @@
 #include "encoding/base92.h"
 #include "log.h"
 #include "particle/particle.h"
+#include "platform.h"
 #include "wallet/wallet.h"
 #include "wallet/keypair.h"
 #include "pipeline.h"
@@ -58,6 +59,7 @@ static void usage(FILE *stream)
           "  wallet verify ROOT_BASE92 receive|spend INDEX\n"
           "  shell                             Line-oriented developer shell\n"
           "  shell-info                        Show detected shell and input guidance\n"
+          "  build-info                        Show compiled target OS and architecture\n"
           "  pipe 'COMMAND // COMMAND // !FILTER ARGS'\n"
           "  pipe                             Prompt for one raw pipeline line\n"
           "  pipe -                           Read one raw pipeline line from stdin\n"
@@ -1069,6 +1071,13 @@ static int run_command(int count, char **args)
         return eclipse_cli_shell(&pipeline_options);
     if (strcmp(command, "shell-info") == 0 && count == 1) {
         eclipse_host_shell_print_guide(stdout, host_shell);
+        return CLI_OK;
+    }
+    if (strcmp(command, "build-info") == 0 && count == 1) {
+        printf("os=%s\narchitecture=%s\npointer_bits=%zu\nbyte_order=%s\n",
+               ECLIPSE_TARGET_OS, ECLIPSE_TARGET_ARCH,
+               (size_t)ECLIPSE_TARGET_POINTER_BITS, ECLIPSE_TARGET_BYTE_ORDER);
+        ECLIPSE_LOG_INFO(2, "compiled target information shown");
         return CLI_OK;
     }
     if (strcmp(command, "pipe") == 0) {

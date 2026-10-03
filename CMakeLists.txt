@@ -4,6 +4,16 @@ project(eclipse_token LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# The current logger, ncurses UI, and developer pipelines use POSIX APIs.
+# Fail clearly on unsupported targets instead of silently configuring a
+# binary that cannot compile. CPU selection itself belongs to the target C
+# compiler; there are no host-specific -march flags in this project.
+if(NOT UNIX)
+    message(FATAL_ERROR "Eclipse currently requires a POSIX target (Linux, macOS, or BSD).")
+endif()
+message(STATUS "Eclipse CMake target hint: ${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR}, pointer size ${CMAKE_SIZEOF_VOID_P} bytes")
+message(STATUS "CPU architecture is selected from target compiler macros; no host CPU flags are added")
+
 find_package(OpenSSL 3.5 REQUIRED COMPONENTS Crypto)
 find_package(Threads REQUIRED)
 find_package(Curses REQUIRED)
@@ -28,6 +38,7 @@ target_link_libraries(eclipse-cli PRIVATE eclipse_core ${CURSES_LIBRARIES})
 
 include(CTest)
 if(BUILD_TESTING)
+    math(EXPR ECLIPSE_TEST_POINTER_BITS "${CMAKE_SIZEOF_VOID_P} * 8")
     add_executable(block_header_test tests/serialize_deserialize_test1.c)
     target_link_libraries(block_header_test PRIVATE eclipse_core)
     add_test(NAME block_header_test COMMAND block_header_test)
@@ -59,5 +70,6 @@ if(BUILD_TESTING)
     add_test(NAME cli_test COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:eclipse-cli>
         -DTEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DEXPECTED_POINTER_BITS=${ECLIPSE_TEST_POINTER_BITS}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.cmake)
 endif()

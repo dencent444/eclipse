@@ -7,13 +7,23 @@ commitment prototype. There is no transaction or consensus integration yet.
 ## Build and test
 
 Requires CMake, ncurses development headers, and OpenSSL 3.5 or later with
-ML-DSA support.
+ML-DSA support. The current implementation targets POSIX systems (Linux,
+macOS, and BSD). CMake selects the target compiler and libraries; the C
+compiler selects the CPU architecture at build time. The project does not add
+`-march=native`, so a binary is not accidentally tied to the build machine.
 
 ```sh
 cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
+./build/eclipse-cli build-info
 ```
+
+`build-info` prints the architecture, pointer width, byte order, and OS baked
+into the binary. It uses target compiler macros, which also work when building
+with a CMake cross-compilation toolchain. A cross build still needs OpenSSL and
+ncurses libraries for the target system. The existing block, wallet packet,
+and particle encodings use explicit byte layouts rather than native C structs.
 
 ## Developer CLI
 

@@ -1,5 +1,15 @@
-if(NOT DEFINED CLI OR NOT DEFINED TEST_BINARY_DIR)
-    message(FATAL_ERROR "CLI and TEST_BINARY_DIR are required")
+if(NOT DEFINED CLI OR NOT DEFINED TEST_BINARY_DIR OR
+   NOT DEFINED EXPECTED_POINTER_BITS)
+    message(FATAL_ERROR "CLI, TEST_BINARY_DIR and EXPECTED_POINTER_BITS are required")
+endif()
+
+execute_process(
+    COMMAND "${CLI}" build-info
+    RESULT_VARIABLE RESULT OUTPUT_VARIABLE OUTPUT ERROR_VARIABLE ERROR
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT RESULT EQUAL 0 OR
+   NOT OUTPUT MATCHES "^os=[^\n]+\narchitecture=[^\n]+\npointer_bits=${EXPECTED_POINTER_BITS}\nbyte_order=(little|big|unknown)$")
+    message(FATAL_ERROR "compiled target information is wrong: ${RESULT}\n${OUTPUT}\n${ERROR}")
 endif()
 
 string(REPEAT "0" 64 ZERO_HASH)
