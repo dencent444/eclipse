@@ -78,6 +78,22 @@ if(NOT RESULT EQUAL 0 OR
     message(FATAL_ERROR "developer transaction CLI pipe failed: ${RESULT}\n${OUTPUT}\n${ERROR}")
 endif()
 
+execute_process(
+    COMMAND "${CLI}" --log-level 0 "block demo // block decode -"
+    RESULT_VARIABLE RESULT OUTPUT_VARIABLE OUTPUT ERROR_VARIABLE ERROR)
+if(NOT RESULT EQUAL 0 OR
+   NOT OUTPUT MATCHES "format_valid=true\nblock_hash=00[0-9a-f]+\npow_valid=true\ntimestamp=1\ndifficulty_bits=8\ntransactions=0\nreward=5000000000\nstate_valid=unknown")
+    message(FATAL_ERROR "developer block CLI pipe failed: ${RESULT}\n${OUTPUT}\n${ERROR}")
+endif()
+
+execute_process(
+    COMMAND "${CLI}" --log-level 0 chain demo
+    RESULT_VARIABLE RESULT OUTPUT_VARIABLE OUTPUT ERROR_VARIABLE ERROR)
+if(NOT RESULT EQUAL 0 OR
+   NOT OUTPUT MATCHES "height=2\ntip=00[0-9a-f]+\nreceiver_amount=4999999999\nnodes_agree=true")
+    message(FATAL_ERROR "developer chain CLI demo failed: ${RESULT}\n${OUTPUT}\n${ERROR}")
+endif()
+
 set(LOG_FILE "${TEST_BINARY_DIR}/cli-smoke.log")
 execute_process(
     COMMAND "${CLI}" --log-level 5 --log-file "${LOG_FILE}"

@@ -3,7 +3,8 @@
 The repository currently contains a block-header serialization exercise,
 ML-DSA wrappers, an in-memory wallet key skeleton, an eclipse-particle
 commitment prototype, a transparent developer transaction with an in-memory
-UTXO set, and transport wrappers. There is no block/consensus integration yet.
+UTXO set, an in-memory developer PoW chain with miner rewards and competing
+branches, and transport wrappers. The chain is not a networked full node yet.
 
 ## Build and test
 
@@ -46,8 +47,8 @@ The loopback `net_test` checks TCP, UDP, and a local WebSocket upgrade/frame.
 
 ## Developer CLI
 
-`eclipse-cli` only calls APIs already implemented in this repository. It does
-not create blocks, transactions, or network state. Run
+`eclipse-cli` only calls APIs already implemented in this repository. It can
+create disposable local blocks and transactions for testing. Run
 `./build/eclipse-cli` for the ncurses menu, or use `serialize` and
 `deserialize` without arguments for step-by-step ncurses input. Enter and
 Backspace edit fields; invalid fields stay on screen for correction and Esc
@@ -70,6 +71,8 @@ HEX=$(./build/eclipse-cli --log-level 0 serialize 1 2 3 4 "$HASH" "$HASH")
 ./build/eclipse-cli particle create 10 "$HASH" "$HASH"
 ./build/eclipse-cli particle commit 10 "$HASH" "$HASH" "$HASH"
 ./build/eclipse-cli 'tx demo // tx decode -'
+./build/eclipse-cli 'block demo // block decode -'
+./build/eclipse-cli chain demo
 ./build/eclipse-cli 'serialize(1,2,3,4,0000000000000000000000000000000000000000000000000000000000000000,0000000000000000000000000000000000000000000000000000000000000000) // deserialize // !grep version'
 ./build/eclipse-cli shell
 ./build/eclipse-cli shell-info
@@ -130,8 +133,15 @@ format, signature preimage, and current limits are in [`protocol.md`](protocol.m
 `eclipse_wallet_sign_tx_input` signs with one spend-domain child; a receive-only
 wallet cannot use that helper. An output must name the selected spend child's
 public key for validation to accept its later spend.
-There is no coinbase emission, persistent state, block integration, or private
-transaction protocol yet.
+`block demo` mines one reward block and emits its canonical wire packet as
+hex. `block decode` checks the packet and Merkle root, reports whether its
+hash meets the included PoW target, and labels state validity unknown because
+it has no parent UTXO state. `chain demo` mines two blocks, spends the first
+reward in a signed transaction, and checks that two independent local chains
+agree on the resulting tip and received output. The chain API also validates
+side branches and reorganizes its canonical UTXO view. Exact dev rules are in
+[`protocol.md`](protocol.md). Persistence, dynamic difficulty, mempool,
+P2P synchronization, and private transactions remain to be implemented.
 
 ## ML-DSA module
 

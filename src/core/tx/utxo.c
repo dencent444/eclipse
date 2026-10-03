@@ -1,4 +1,4 @@
-#include "utxo.h"
+#include "utxo_internal.h"
 #include "../log.h"
 
 #include <stdlib.h>
@@ -77,14 +77,36 @@ void eclipse_utxo_set_free(eclipse_utxo_set_t *set)
     ECLIPSE_LOG_INFO(3, "developer UTXO set released");
 }
 
-/* Explicit test/bootstrap insertion is deliberately outside transaction
- * validation. It cannot be mistaken for an emission or mining rule. */
-eclipse_error_t eclipse_utxo_set_seed_dev(eclipse_utxo_set_t *set,
+eclipse_error_t eclipse_utxo_set_clone(const eclipse_utxo_set_t *source,
+                                      eclipse_utxo_set_t **out)
+{
+    if (source == NULL || out == NULL) return ECLIPSE_ERROR_NULL_POINTER;
+    *out = NULL;
+    eclipse_utxo_set_t *copy = NULL;
+    eclipse_error_t status = eclipse_utxo_set_create(&copy);
+    if (status != ECLIPSE_SUCCESS) return status;
+    status = reserve(copy, source->count);
+    if (status != ECLIPSE_SUCCESS) {
+        eclipse_utxo_set_free(copy);
+        return status;
+    }
+    if (source->count != 0)
+        memcpy(copy->entries, source->entries,
+               source->count * sizeof(*copy->entries));
+    copy->count = source->count;
+    *out = copy;
+    ECLIPSE_LOG_INFO(5, "UTXO branch snapshot cloned");
+    return ECLIPSE_SUCCESS;
+}
+
+/* Shared low-level output insertion. Only the chain validates a reward amount;
+ * the public seed helper remains an explicitly local test fixture. */
+static eclipse_error_t insert_unspent(eclipse_utxo_set_t *set,
     const uint8_t txid[ECLIPSE_TX_ID_SIZE], uint32_t index,
     const eclipse_tx_output_t *output)
 {
     if (set == NULL || txid == NULL || output == NULL) {
-        ECLIPSE_LOG_WARNING("developer UTXO seed rejected a null argument");
+        ECLIPSE_LOG_WARNING("UTXO insertion rejected a null argument");
         return ECLIPSE_ERROR_NULL_POINTER;
     }
     eclipse_ml_dsa_info_t info;
@@ -92,7 +114,7 @@ eclipse_error_t eclipse_utxo_set_seed_dev(eclipse_utxo_set_t *set,
         !eclipse_ml_dsa_info(output->scheme, &info) ||
         output->public_key_length != info.public_key_size ||
         lookup(set, txid, index) != NULL) {
-        ECLIPSE_LOG_WARNING("developer UTXO seed rejected malformed or duplicate output");
+        ECLIPSE_LOG_WARNING("UTXO insertion rejected malformed or duplicate output");
         return ECLIPSE_ERROR_INVALID_ARGUMENT;
     }
     eclipse_ml_dsa_key_t *checked = NULL;
@@ -100,6 +122,7 @@ eclipse_error_t eclipse_utxo_set_seed_dev(eclipse_utxo_set_t *set,
         output->scheme, output->public_key, output->public_key_length, &checked);
     eclipse_ml_dsa_key_free(checked);
     if (status != ECLIPSE_SUCCESS) return status;
+    if (set->count == SIZE_MAX) return ECLIPSE_ERROR_OUT_OF_MEMORY;
     status = reserve(set, set->count + 1);
     if (status != ECLIPSE_SUCCESS) return status;
     utxo_entry_t *entry = &set->entries[set->count++];
@@ -107,8 +130,26 @@ eclipse_error_t eclipse_utxo_set_seed_dev(eclipse_utxo_set_t *set,
     entry->index = index;
     entry->output = *output;
     entry->spent = false;
-    ECLIPSE_LOG_INFO(2, "developer UTXO seed inserted");
     return ECLIPSE_SUCCESS;
+}
+
+eclipse_error_t eclipse_utxo_set_seed_dev(eclipse_utxo_set_t *set,
+    const uint8_t txid[ECLIPSE_TX_ID_SIZE], uint32_t index,
+    const eclipse_tx_output_t *output)
+{
+    eclipse_error_t status = insert_unspent(set, txid, index, output);
+    if (status == ECLIPSE_SUCCESS)
+        ECLIPSE_LOG_INFO(2, "developer UTXO test seed inserted");
+    return status;
+}
+
+eclipse_error_t eclipse_utxo_set_credit_reward(eclipse_utxo_set_t *set,
+    const uint8_t id[ECLIPSE_TX_ID_SIZE], const eclipse_tx_output_t *output)
+{
+    eclipse_error_t status = insert_unspent(set, id, 0, output);
+    if (status == ECLIPSE_SUCCESS)
+        ECLIPSE_LOG_INFO(3, "validated block reward credited to branch state");
+    return status;
 }
 
 eclipse_error_t eclipse_utxo_set_find(const eclipse_utxo_set_t *set,

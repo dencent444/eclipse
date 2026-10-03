@@ -21,6 +21,8 @@ find_package(CURL 7.86 REQUIRED)
 
 add_library(eclipse_core STATIC
     src/core/block/block.c
+    src/core/block/chain.c
+    src/core/block/miner.c
     src/core/crypto/ml_dsa.c
     src/core/crypto/ml_dsa_math.c
     src/core/encoding/base92.c
@@ -80,6 +82,10 @@ if(BUILD_TESTING)
     add_executable(tx_test tests/tx_test.c)
     target_link_libraries(tx_test PRIVATE eclipse_core)
     add_test(NAME tx_test COMMAND tx_test)
+
+    add_executable(chain_test tests/chain_test.c)
+    target_link_libraries(chain_test PRIVATE eclipse_core)
+    add_test(NAME chain_test COMMAND chain_test)
 
     add_test(NAME cli_test COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:eclipse-cli>

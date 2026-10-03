@@ -3,6 +3,8 @@
  * Never log raw CLI arguments: a later command may carry private material.
  */
 #include "block/block.h"
+#include "block/chain.h"
+#include "block/miner.h"
 #include "crypto/ml_dsa.h"
 #include "crypto/ml_dsa_math.h"
 #include "encoding/base92.h"
@@ -57,6 +59,9 @@ static void usage(FILE *stream)
           "  particle verify AMOUNT RECEIVE_HEX32 SPEND_HEX32 RANDOM_HEX32 COMMIT_HEX32\n"
           "  tx demo                           Build one local signed dev transfer\n"
           "  tx decode HEX|-                   Inspect one signed dev transaction\n"
+          "  block demo                        Mine and emit one dev block as hex\n"
+          "  block decode HEX|-                Inspect a canonical dev block\n"
+          "  chain demo                        Mine, transfer, and validate on two nodes\n"
           "  wallet create 44|65|87\n"
           "  wallet domain ROOT_BASE92 receive|spend\n"
           "  wallet public ROOT_BASE92 receive|spend master|INDEX\n"
@@ -1063,6 +1068,227 @@ static int tx_command(int count, char **args)
     return CLI_USAGE;
 }
 
+/* The block demo uses a fresh disposable miner key. Its output is one full
+ * canonical block packet, ready for `block decode -`; no secret is printed. */
+static int block_demo(void)
+{
+    eclipse_chain_t *chain = NULL;
+    eclipse_ml_dsa_key_t *miner = NULL;
+    eclipse_block_t *block = NULL;
+    uint8_t *wire = NULL;
+    char *hex = NULL;
+    eclipse_error_t status = eclipse_chain_create(&chain);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_ml_dsa_generate(ECLIPSE_ML_DSA_44, &miner);
+    uint8_t parent[32];
+    uint64_t height = 0;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_tip(chain, parent, &height);
+    eclipse_tx_output_t destination = {0};
+    destination.scheme = ECLIPSE_ML_DSA_44;
+    destination.public_key_length = 1312;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_ml_dsa_export_public(miner, destination.public_key,
+                                              sizeof(destination.public_key));
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_make_candidate(chain, parent, 1, &destination,
+                                               NULL, 0, &block);
+    bool found = false;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_miner_mine(block, 100000, &found);
+    if (status == ECLIPSE_SUCCESS && !found)
+        status = ECLIPSE_ERROR_INVALID_ARGUMENT;
+    if (status == ECLIPSE_SUCCESS) {
+        wire = malloc(ECLIPSE_BLOCK_MAX_WIRE_SIZE);
+        if (wire == NULL) status = ECLIPSE_ERROR_OUT_OF_MEMORY;
+    }
+    size_t length = 0;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_block_serialize(block, wire,
+                                         ECLIPSE_BLOCK_MAX_WIRE_SIZE, &length);
+    if (status == ECLIPSE_SUCCESS) {
+        hex = malloc(length * 2 + 1);
+        if (hex == NULL) status = ECLIPSE_ERROR_OUT_OF_MEMORY;
+    }
+    if (status == ECLIPSE_SUCCESS) {
+        format_hex(wire, length, hex);
+        puts(hex);
+        ECLIPSE_LOG_INFO(1, "CLI mined a disposable developer block");
+    }
+    free(hex);
+    free(wire);
+    eclipse_block_free(block);
+    eclipse_ml_dsa_key_free(miner);
+    eclipse_chain_free(chain);
+    if (status != ECLIPSE_SUCCESS)
+        ECLIPSE_LOG_ERROR("block demo failed with code %d", status);
+    return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
+}
+
+/* Decoder authenticates canonical bytes and Merkle root. It cannot decide
+ * whether the block belongs to a valid chain without that chain's UTXOs. */
+static int block_decode(const char *argument)
+{
+    const size_t text_capacity = ECLIPSE_BLOCK_MAX_WIRE_SIZE * 2u + 2u;
+    char *piped = malloc(text_capacity);
+    uint8_t *wire = malloc(ECLIPSE_BLOCK_MAX_WIRE_SIZE);
+    if (piped == NULL || wire == NULL) {
+        free(piped);
+        free(wire);
+        return CLI_ERROR;
+    }
+    const char *hex = resolve_input(argument, piped, text_capacity);
+    size_t text_length = hex == NULL ? 0 : strlen(hex);
+    int result = CLI_USAGE;
+    if (text_length == 0 || (text_length & 1u) != 0 ||
+        text_length / 2 > ECLIPSE_BLOCK_MAX_WIRE_SIZE ||
+        !parse_hex(hex, wire, text_length / 2)) {
+        fputs("Expected one canonical block as even-length hex.\n", stderr);
+        goto done;
+    }
+    eclipse_block_t *block = NULL;
+    eclipse_error_t status = eclipse_block_deserialize(wire, text_length / 2,
+                                                       &block);
+    if (status != ECLIPSE_SUCCESS) goto done;
+    eclipse_block_header_t header;
+    eclipse_tx_output_t reward;
+    uint8_t hash[32];
+    status = eclipse_block_header(block, &header);
+    if (status == ECLIPSE_SUCCESS) status = eclipse_block_reward(block, &reward);
+    if (status == ECLIPSE_SUCCESS) status = eclipse_block_hash(block, hash);
+    if (status == ECLIPSE_SUCCESS) {
+        char hash_hex[65];
+        format_hex(hash, sizeof(hash), hash_hex);
+        printf("format_valid=true\nblock_hash=%s\npow_valid=%s\n"
+               "timestamp=%" PRIu64 "\ndifficulty_bits=%" PRIu32 "\n"
+               "transactions=%zu\nreward=%" PRIu64 "\nstate_valid=unknown\n",
+               hash_hex, (header.difficulty == ECLIPSE_BLOCK_DEV_DIFFICULTY_BITS &&
+               eclipse_pow_hash_meets_target(hash, header.difficulty)) ?
+               "true" : "false", header.timestamp, header.difficulty,
+               eclipse_block_transaction_count(block), reward.amount);
+        result = CLI_OK;
+    } else result = CLI_ERROR;
+    eclipse_block_free(block);
+done:
+    OPENSSL_cleanse(piped, text_capacity);
+    free(piped);
+    free(wire);
+    return result;
+}
+
+static int block_command(int count, char **args)
+{
+    if (count == 1 && strcmp(args[0], "demo") == 0) return block_demo();
+    if (count == 2 && strcmp(args[0], "decode") == 0)
+        return block_decode(args[1]);
+    fputs("Use block demo or block decode HEX|-.\n", stderr);
+    return CLI_USAGE;
+}
+
+/* Mine a first reward, spend it in a second block, and independently validate
+ * both blocks on two fresh nodes. This is deliberately all local process state. */
+static int chain_demo(void)
+{
+    eclipse_chain_t *first = NULL, *second = NULL;
+    eclipse_ml_dsa_key_t *miner = NULL, *receiver = NULL;
+    eclipse_block_t *one = NULL, *two = NULL;
+    eclipse_error_t status = eclipse_chain_create(&first);
+    if (status == ECLIPSE_SUCCESS) status = eclipse_chain_create(&second);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_ml_dsa_generate(ECLIPSE_ML_DSA_44, &miner);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_ml_dsa_generate(ECLIPSE_ML_DSA_44, &receiver);
+    uint8_t genesis[32], one_hash[32], reward_id[32], txid[32];
+    uint64_t height = 0;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_tip(first, genesis, &height);
+    eclipse_tx_output_t destination = {0};
+    destination.scheme = ECLIPSE_ML_DSA_44;
+    destination.public_key_length = 1312;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_ml_dsa_export_public(miner, destination.public_key,
+                                              sizeof(destination.public_key));
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_make_candidate(first, genesis, 1, &destination,
+                                               NULL, 0, &one);
+    bool found = false, selected = false;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_miner_mine(one, 100000, &found);
+    if (status == ECLIPSE_SUCCESS && !found)
+        status = ECLIPSE_ERROR_INVALID_ARGUMENT;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_accept(first, one, &selected);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_accept(second, one, &selected);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_block_hash(one, one_hash);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_block_reward_id(one, reward_id);
+    eclipse_tx_t *tx = NULL;
+    if (status == ECLIPSE_SUCCESS) {
+        tx = malloc(sizeof(*tx));
+        if (tx == NULL) status = ECLIPSE_ERROR_OUT_OF_MEMORY;
+    }
+    uint8_t receiver_public[1312];
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_ml_dsa_export_public(receiver, receiver_public,
+                                              sizeof(receiver_public));
+    if (status == ECLIPSE_SUCCESS) status = eclipse_tx_init(tx);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_tx_add_input(tx, reward_id, 0);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_tx_add_output(tx, ECLIPSE_DEV_INITIAL_SUBSIDY - 1,
+                                       ECLIPSE_ML_DSA_44, receiver_public,
+                                       sizeof(receiver_public));
+    if (status == ECLIPSE_SUCCESS) status = eclipse_tx_set_fee(tx, 1);
+    if (status == ECLIPSE_SUCCESS) status = eclipse_tx_sign_input(tx, 0, miner);
+    const eclipse_tx_t *transactions[] = {tx};
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_make_candidate(first, one_hash, 2,
+                                               &destination, transactions, 1, &two);
+    found = false;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_miner_mine(two, 100000, &found);
+    if (status == ECLIPSE_SUCCESS && !found)
+        status = ECLIPSE_ERROR_INVALID_ARGUMENT;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_accept(first, two, &selected);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_accept(second, two, &selected);
+    if (status == ECLIPSE_SUCCESS) status = eclipse_tx_id(tx, txid);
+    uint8_t first_tip[32], second_tip[32];
+    uint64_t second_height = 0;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_tip(first, first_tip, &height);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_tip(second, second_tip, &second_height);
+    eclipse_tx_output_t received = {0};
+    bool owned = false;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_find_utxo(second, txid, 0, &received, &owned);
+    if (status == ECLIPSE_SUCCESS && (!owned || height != 2 ||
+        second_height != height || memcmp(first_tip, second_tip, 32) != 0))
+        status = ECLIPSE_ERROR_INVALID_ARGUMENT;
+    if (status == ECLIPSE_SUCCESS) {
+        char tip_hex[65];
+        format_hex(first_tip, sizeof(first_tip), tip_hex);
+        printf("height=%" PRIu64 "\ntip=%s\n"
+               "receiver_amount=%" PRIu64 "\nnodes_agree=true\n",
+               height, tip_hex, received.amount);
+        ECLIPSE_LOG_INFO(1, "CLI mined and independently validated two dev blocks");
+    }
+    free(tx);
+    eclipse_block_free(two);
+    eclipse_block_free(one);
+    eclipse_ml_dsa_key_free(receiver);
+    eclipse_ml_dsa_key_free(miner);
+    eclipse_chain_free(second);
+    eclipse_chain_free(first);
+    if (status != ECLIPSE_SUCCESS)
+        ECLIPSE_LOG_ERROR("chain demo failed with code %d", status);
+    return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
+}
+
 static int wallet_command(int count, char **args)
 {
     /* Only this branch creates a new root. Other branches import an existing
@@ -1221,16 +1447,17 @@ static int tui_menu(void)
         mvprintw(3, 2, "1  Serialize a block header");
         mvprintw(4, 2, "2  Deserialize a block header");
         mvprintw(5, 2, "3  Build a local signed dev transaction");
-        mvprintw(6, 2, "s  Shell    i  Shell info    h  Help    q  Quit");
+        mvprintw(6, 2, "4 Chain demo  s Shell  i Info  h Help  q Quit");
         refresh();
         int choice = getch();
-        if (choice == '1' || choice == '2' || choice == '3' || choice == 's' ||
+        if (choice == '1' || choice == '2' || choice == '3' || choice == '4' || choice == 's' ||
             choice == 'i' || choice == 'h' ||
             choice == 'q' || choice == 27) {
             endwin();
             if (choice == '1') return serialize_command(0, NULL);
             if (choice == '2') return deserialize_command(0, NULL);
             if (choice == '3') return tx_demo();
+            if (choice == '4') return chain_demo();
             if (choice == 's') return eclipse_cli_shell(&pipeline_options);
             if (choice == 'i') eclipse_host_shell_print_guide(stdout, host_shell);
             if (choice == 'h') usage(stdout);
@@ -1274,6 +1501,11 @@ static int run_command(int count, char **args)
         return particle_command(count - 1, args + 1);
     if (strcmp(command, "tx") == 0)
         return tx_command(count - 1, args + 1);
+    if (strcmp(command, "block") == 0)
+        return block_command(count - 1, args + 1);
+    if (strcmp(command, "chain") == 0 && count == 2 &&
+        strcmp(args[1], "demo") == 0)
+        return chain_demo();
     if (strcmp(command, "wallet") == 0)
         return wallet_command(count - 1, args + 1);
     if (strcmp(command, "shell") == 0 && count == 1)

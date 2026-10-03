@@ -4,9 +4,14 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../error.h"
+#include "../tx/tx.h"
 
 /* The wire size is fixed; sizeof(eclipse_block_header_t) may include padding. */
 #define ECLIPSE_BLOCK_HEADER_SERIALIZED_SIZE 88u
+#define ECLIPSE_BLOCK_VERSION 1u
+#define ECLIPSE_BLOCK_DEV_DIFFICULTY_BITS 8u
+#define ECLIPSE_BLOCK_MAX_TRANSACTIONS 8u
+#define ECLIPSE_BLOCK_MAX_WIRE_SIZE (4u + ECLIPSE_BLOCK_HEADER_SERIALIZED_SIZE + 1u + 11u + ECLIPSE_TX_MAX_PUBLIC_KEY_SIZE + ECLIPSE_BLOCK_MAX_TRANSACTIONS * (4u + ECLIPSE_TX_MAX_WIRE_SIZE))
 
 typedef struct {
     uint32_t version;
@@ -56,5 +61,37 @@ eclipse_error_t eclipse_block_header_serialize(
     const eclipse_block_header_t *header, uint8_t *buffer, size_t buffer_size);
 eclipse_error_t eclipse_block_header_deserialize(
     const uint8_t *buffer, eclipse_block_header_t *header, size_t buffer_size);
+
+/* Owned developer block. The reward is a separate, input-free coinbase claim;
+ * ordinary ETX0 transactions cannot mint coins. The header root commits to
+ * that claim and to every signed transaction in order. */
+typedef struct eclipse_block eclipse_block_t;
+eclipse_error_t eclipse_block_create(
+    const uint8_t prev_hash[32], uint64_t timestamp,
+    const eclipse_tx_output_t *reward, eclipse_block_t **out);
+void eclipse_block_free(eclipse_block_t *block);
+eclipse_error_t eclipse_block_add_transaction(eclipse_block_t *block,
+                                              const eclipse_tx_t *tx);
+eclipse_error_t eclipse_block_header(const eclipse_block_t *block,
+                                     eclipse_block_header_t *out);
+eclipse_error_t eclipse_block_reward(const eclipse_block_t *block,
+                                     eclipse_tx_output_t *out);
+size_t eclipse_block_transaction_count(const eclipse_block_t *block);
+eclipse_error_t eclipse_block_transaction(const eclipse_block_t *block,
+                                          size_t index, eclipse_tx_t *out);
+eclipse_error_t eclipse_block_set_nonce(eclipse_block_t *block, uint64_t nonce);
+eclipse_error_t eclipse_block_compute_root(const eclipse_block_t *block,
+                                           uint8_t out[32]);
+eclipse_error_t eclipse_block_hash(const eclipse_block_t *block,
+                                   uint8_t out[32]);
+/* Reward UTXO outpoint is (this ID, index 0); it is spendable from the next
+ * block. It is distinct from ordinary transaction IDs. */
+eclipse_error_t eclipse_block_reward_id(const eclipse_block_t *block,
+                                        uint8_t out[32]);
+eclipse_error_t eclipse_block_serialize(const eclipse_block_t *block,
+                                        uint8_t *out, size_t capacity,
+                                        size_t *written);
+eclipse_error_t eclipse_block_deserialize(const uint8_t *wire, size_t length,
+                                          eclipse_block_t **out);
 
 #endif // BLOCK_H

@@ -4,6 +4,71 @@ This document records implemented bytes and the intended boundaries of the
 experiment. It is **not** a mainnet consensus specification. Changing a
 commitment or transaction encoding requires a new version and test vectors.
 
+## Local developer chain (block v1)
+
+The empty genesis is the fixed SHA3-256 digest of ASCII
+`ECLIPSE/DEV/GENESIS/V1`. It has height zero and **zero spendable supply**.
+Height one is the first mined block. This is still an in-memory developer
+protocol, not a public mainnet or a networked full node.
+
+A block has at most eight signed `ETX0` transactions. Its exact wire form is:
+
+```text
+ASCII("EBL1")
+|| header[88]
+|| transaction_count_u8
+|| reward_amount_u64be || reward_scheme_u8 || reward_key_length_u16be || reward_public_key
+|| for each transaction: length_u32be || signed_transaction_bytes
+```
+
+The 88-byte header layout is documented in `src/core/block/block.h`. Its
+version is exactly 1. A block hash is
+`SHA3-256(ASCII("ECLIPSE/DEV/BLOCK/ID/V1") || header[88])`. Every block links
+to its parent hash; height one links to the fixed genesis digest. The header
+`merkle_root` commits to the **reward claim and ordered signed transactions**:
+
+```text
+reward leaf = SHA3-256(ASCII("ECLIPSE/DEV/BLOCK/REWARD/V1") || reward wire fields)
+tx leaf     = SHA3-256(ASCII("ECLIPSE/DEV/BLOCK/TX/V1") || transaction_id[32])
+parent      = SHA3-256(ASCII("ECLIPSE/DEV/BLOCK/NODE/V1") || left[32] || right[32])
+```
+
+At each tree level the last leaf is duplicated if the width is odd. One
+reward leaf alone is already the root. The reward outpoint has index zero and
+ID `SHA3-256(ASCII("ECLIPSE/DEV/REWARD/ID/V1") || block_hash[32])`. It can be
+spent from the next block; a transaction in its own block cannot spend it.
+The fixed vector in `tests/chain_test.c` uses the ML-DSA-44 public key from
+seed `01 || 00×31`, height-one reward 5,000,000,000, timestamp 1, difficulty
+8, nonce 0 and no ordinary transactions. Its genesis digest is
+`b0d1787f93b82fbf52777889c17bb15fd52b241fcc2d05047d36b585b4faf20a`,
+root is `f796ed7acf0a489adb15a2d567e6fbbad489b3a21aa78259037ad57fd2fd4648`,
+and pre-mining block hash is
+`661399fe4e59ce3ccc59357f972c531187152fdcd8d8eb168581e24149de6d29`.
+
+The developer subsidy is 5,000,000,000 smallest units at height 1 and halves
+every 210,000 blocks. A valid reward amount is **exactly** subsidy at that
+height plus the sum of this block's transaction fees. `ETX0` transactions
+cannot mint value. A block applies its transactions in their listed order,
+then inserts the reward output. This permits an ordinary output from an
+earlier transaction in the same block to be spent later in that block.
+
+Current PoW difficulty is a fixed **8 leading zero bits** in the block hash.
+The difficulty header field must equal 8. The timestamp must be greater than
+its parent's and no more than 7,200 seconds later. These checks depend only
+on chain data, not on the validating machine's clock. Each accepted block adds
+`2^8` units of dev work. The canonical branch has the greatest accumulated
+work; equal-work tips use the lexicographically smaller block hash. Every
+candidate is validated against a snapshot of its own parent's UTXO state, so
+changing the canonical tip changes the visible state without editing a shared
+state in place.
+
+The implementation retains validated side branches and per-block UTXO
+snapshots in memory. It does not yet persist the chain, adjust difficulty,
+accept untrusted peers, synchronize over P2P, maintain a mempool, or enforce
+wall-clock future-time limits. A block decoder checks the packet and root;
+only chain acceptance checks parent, PoW, reward, signatures, and UTXO rules.
+Fixed 8-bit work is intentionally cheap for local experiments.
+
 ## Transparent transaction (developer v0)
 
 This first transaction format is deliberately transparent and independent of
@@ -53,10 +118,11 @@ Validation against an independent UTXO set checks that every input is present
 and unspent, its signature verifies under that output's public key, sums fit
 in `uint64_t`, and `sum(inputs) == sum(outputs) + fee`. Applying a transaction
 first validates and reserves memory, then marks inputs spent and inserts
-outputs under `(transaction ID, output index)`. The in-memory set has no disk
-persistence, block order, concurrent access, reorganization rollback, mempool,
-coinbase reward, or miner fee payout yet. `eclipse-cli tx decode` only checks
-the format because it has no independently validated UTXO set.
+outputs under `(transaction ID, output index)`. The standalone in-memory set
+has no disk persistence or concurrent access. The chain applies ordered
+transfers on parent snapshots and adds block rewards, but has no mempool or
+disk state. `eclipse-cli tx decode` only checks the format because it has no
+independently validated UTXO set.
 
 The wallet helper signs with a child of the **spend** domain. An output must
 name that child's public key to be spendable by it. The separate receive

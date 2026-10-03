@@ -11,6 +11,9 @@ typedef struct eclipse_utxo_set eclipse_utxo_set_t;
 
 eclipse_error_t eclipse_utxo_set_create(eclipse_utxo_set_t **out);
 void eclipse_utxo_set_free(eclipse_utxo_set_t *set);
+/* Snapshot for validating a candidate branch without modifying its parent. */
+eclipse_error_t eclipse_utxo_set_clone(const eclipse_utxo_set_t *source,
+                                      eclipse_utxo_set_t **out);
 
 /* DEV ONLY: seed an independent local test state before a coinbase/emission
  * rule exists. This is not a transaction, mining reward, or network API. */
@@ -30,7 +33,7 @@ eclipse_error_t eclipse_utxo_set_find(const eclipse_utxo_set_t *set,
 eclipse_error_t eclipse_tx_validate(const eclipse_tx_t *tx,
                                     const eclipse_utxo_set_t *set, bool *valid);
 /* Validate, reserve space, then atomically spend inputs and create outputs.
- * No block integration or reorganization rollback exists yet. */
+ * The chain applies this to an isolated parent snapshot for each block. */
 eclipse_error_t eclipse_tx_apply(const eclipse_tx_t *tx, eclipse_utxo_set_t *set,
                                  uint8_t txid_out[ECLIPSE_TX_ID_SIZE]);
 
