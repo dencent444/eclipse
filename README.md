@@ -1,8 +1,8 @@
 # Eclipse Token (experimental)
 
 The repository currently contains a block-header serialization exercise,
-ML-DSA wrappers, and an in-memory wallet key skeleton. There is no transaction
-or consensus integration yet.
+ML-DSA wrappers, an in-memory wallet key skeleton, and an eclipse-particle
+commitment prototype. There is no transaction or consensus integration yet.
 
 ## Build and test
 
@@ -18,7 +18,7 @@ ctest --test-dir build --output-on-failure
 ## Developer CLI
 
 `eclipse-cli` only calls APIs already implemented in this repository. It does
-not create blocks, transactions, wallets, or network state. Run
+not create blocks, transactions, or network state. Run
 `./build/eclipse-cli` for the ncurses menu, or use `serialize` and
 `deserialize` without arguments for step-by-step ncurses input. Enter and
 Backspace edit fields; invalid fields stay on screen for correction and Esc
@@ -36,6 +36,12 @@ HEX=$(./build/eclipse-cli --log-level 0 serialize 1 2 3 4 "$HASH" "$HASH")
 ./build/eclipse-cli deserialize "$HEX"
 ./build/eclipse-cli math mod -1
 ./build/eclipse-cli ml-dsa self-test 44 "development message" "eclipse-cli"
+./build/eclipse-cli keypair generate 44
+./build/eclipse-cli base92 encode 68656c6c6f
+./build/eclipse-cli particle create 10 "$HASH" "$HASH"
+./build/eclipse-cli particle commit 10 "$HASH" "$HASH" "$HASH"
+./build/eclipse-cli 'serialize(1,2,3,4,0000000000000000000000000000000000000000000000000000000000000000,0000000000000000000000000000000000000000000000000000000000000000) // deserialize // !grep version'
+./build/eclipse-cli shell
 ```
 
 The header has six fields in the order `version`, `timestamp`, `difficulty`,
@@ -48,6 +54,30 @@ then verifies it. It does not write a private key to disk.
 Use `--log-level 0..5` to control detail and `--log-file PATH` to append logs
 to a file. The CLI never logs raw arguments, header bytes, messages, keys, or
 signatures.
+
+The CLI also exposes `ml-dsa derive-public`, `math add|sub|mul`, Base92
+decode, `particle verify`, and wallet creation, domain export, public-key
+derivation, public packet decoding, and child binding verification. See
+`./build/eclipse-cli help` for the complete argument forms. `wallet create`
+prints an **unencrypted recovery root** to stdout; `wallet domain` prints an
+unencrypted role secret. Treat either output as private.
+
+`shell` is a line-oriented developer REPL; the ncurses menu also offers it.
+`pipe 'STAGE // STAGE'` runs one pipeline, and a quoted pipeline expression can
+be passed directly as shown above. `//` connects stdout to the next stage;
+`!grep version` explicitly runs the external `grep` program. External stages
+use `execvp`, with no shell expansion or implicit commands. Use `-` as an
+input value for commands that accept one piped value, such as
+`wallet create 44 // wallet domain - receive`. The CLI writes logs to stderr
+by default, so they do not enter the data pipe. Logs omit keys, wallet roots,
+particle openings, and serialized values. Shell history and process arguments
+can still expose secrets supplied on the command line; keep secret commands
+in a private development environment.
+
+The provisional particle fields and exact commitment bytes are in
+[`protocol.md`](protocol.md). A particle opening is private, while its derived
+SHA3-256 commitment can be shared. The CLI's `particle create` intentionally
+prints the opening for development inspection only.
 
 ## ML-DSA module
 

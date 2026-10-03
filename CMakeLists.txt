@@ -13,6 +13,7 @@ add_library(eclipse_core STATIC
     src/core/crypto/ml_dsa.c
     src/core/crypto/ml_dsa_math.c
     src/core/encoding/base92.c
+    src/core/particle/particle.c
     src/core/wallet/keypair.c
     src/core/wallet/recovery.c
     src/core/wallet/wallet.c
@@ -21,7 +22,7 @@ add_library(eclipse_core STATIC
 target_include_directories(eclipse_core PUBLIC src/core)
 target_link_libraries(eclipse_core PUBLIC OpenSSL::Crypto Threads::Threads)
 
-add_executable(eclipse-cli src/cli/main.c)
+add_executable(eclipse-cli src/cli/main.c src/cli/pipeline.c)
 target_include_directories(eclipse-cli PRIVATE ${CURSES_INCLUDE_DIRS})
 target_link_libraries(eclipse-cli PRIVATE eclipse_core ${CURSES_LIBRARIES})
 
@@ -46,6 +47,10 @@ if(BUILD_TESTING)
     add_executable(base92_test tests/base92_test.c)
     target_link_libraries(base92_test PRIVATE eclipse_core)
     add_test(NAME base92_test COMMAND base92_test)
+
+    add_executable(particle_test tests/particle_test.c)
+    target_link_libraries(particle_test PRIVATE eclipse_core)
+    add_test(NAME particle_test COMMAND particle_test)
 
     add_executable(wallet_test tests/wallet_test.c)
     target_link_libraries(wallet_test PRIVATE eclipse_core)

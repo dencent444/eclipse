@@ -5,7 +5,14 @@
 #include "block/block.h"
 #include "crypto/ml_dsa.h"
 #include "crypto/ml_dsa_math.h"
+#include "encoding/base92.h"
 #include "log.h"
+#include "particle/particle.h"
+#include "wallet/wallet.h"
+#include "wallet/keypair.h"
+#include "pipeline.h"
+
+#include <openssl/crypto.h>
 
 #include <curses.h>
 #include <ctype.h>
@@ -18,6 +25,7 @@
 #include <unistd.h>
 
 enum { CLI_OK = 0, CLI_ERROR = 1, CLI_USAGE = 2 };
+static eclipse_cli_pipeline_options_t pipeline_options;
 
 static void usage(FILE *stream)
 {
@@ -34,10 +42,28 @@ static void usage(FILE *stream)
           "  math mod SIGNED_INTEGER\n"
           "  math add|sub|mul LEFT RIGHT\n"
           "  ml-dsa self-test 44|65|87 MESSAGE [CONTEXT]\n"
+          "  ml-dsa derive-public 44|65|87 SEED_HEX32\n"
+          "  keypair generate 44|65|87\n"
+          "  base92 encode HEX | base92 decode TEXT\n"
+          "  particle create AMOUNT RECEIVE_HEX32 SPEND_HEX32\n"
+          "  particle commit AMOUNT RECEIVE_HEX32 SPEND_HEX32 RANDOM_HEX32\n"
+          "  particle verify AMOUNT RECEIVE_HEX32 SPEND_HEX32 RANDOM_HEX32 COMMIT_HEX32\n"
+          "  wallet create 44|65|87\n"
+          "  wallet domain ROOT_BASE92 receive|spend\n"
+          "  wallet public ROOT_BASE92 receive|spend master|INDEX\n"
+          "  wallet role-public DOMAIN_BASE92 receive|spend master|INDEX\n"
+          "  wallet public-decode PUBLIC_BASE92\n"
+          "  wallet verify ROOT_BASE92 receive|spend INDEX\n"
+          "  shell                             Line-oriented developer shell\n"
+          "  pipe 'COMMAND // COMMAND // !FILTER ARGS'\n"
           "\n"
           "Integers are decimal or 0x-prefixed hex, except math mod (decimal).\n"
           "Hashes are exactly 32 bytes (64 hex digits), without a 0x prefix.\n"
           "The serialized header is exactly 88 bytes (176 hex digits).\n"
+          "Use - in place of a single input value to read one line from stdin.\n"
+          "In the developer shell, // pipes stdout into the next stage.\n"
+          "A stage beginning with ! runs an external program (no shell expansion).\n"
+          "Wallet create/domain output unencrypted secrets; protect stdout.\n"
           "Quote the parenthesized form in a shell. Logs go to stderr by default.\n",
           stream);
 }
@@ -97,6 +123,32 @@ static bool parse_hex(const char *hex, uint8_t *out, size_t bytes)
         out[i] = (uint8_t)((high << 4) | low);
     }
     return true;
+}
+
+static bool read_stream_token(char *buffer, size_t capacity)
+{
+    if (capacity < 2 || fgets(buffer, (int)capacity, stdin) == NULL) return false;
+    size_t length = strlen(buffer);
+    if (length == capacity - 1 && buffer[length - 1] != '\n') return false;
+    char *value = trim(buffer);
+    if (*value == '\0') return false;
+    if (value != buffer) memmove(buffer, value, strlen(value) + 1);
+    /* A piped command consumes exactly one value. Extra nonblank lines are a
+       likely mistake, especially when the value is a secret root. */
+    int ch;
+    while ((ch = getchar()) != EOF)
+        if (!isspace((unsigned char)ch)) return false;
+    return true;
+}
+
+static const char *resolve_input(const char *argument, char *buffer, size_t capacity)
+{
+    if (strcmp(argument, "-") != 0) return argument;
+    if (isatty(STDIN_FILENO) || !read_stream_token(buffer, capacity)) {
+        ECLIPSE_LOG_WARNING("piped command input is missing or malformed");
+        return NULL;
+    }
+    return buffer;
 }
 
 static bool valid_serialize_field(size_t index, const char *text)
@@ -419,12 +471,20 @@ static int deserialize_command(int count, char **args)
     const char *hex;
     char input[1][256];
     if (count == 0) {
-        const char *label = "serialized header (176 hex digits)";
-        ECLIPSE_LOG_INFO(2, "opening interactive block header deserializer");
-        if (!tui_collect("Deserialize block header", &label, input, 1,
-                         valid_deserialize_field)) {
-            ECLIPSE_LOG_INFO(2, "interactive block header deserializer cancelled");
-            return CLI_USAGE;
+        if (!isatty(STDIN_FILENO)) {
+            if (!read_stream_token(input[0], sizeof(input[0]))) {
+                ECLIPSE_LOG_WARNING("deserializer pipe input is missing or malformed");
+                OPENSSL_cleanse(input, sizeof(input));
+                return CLI_USAGE;
+            }
+        } else {
+            const char *label = "serialized header (176 hex digits)";
+            ECLIPSE_LOG_INFO(2, "opening interactive block header deserializer");
+            if (!tui_collect("Deserialize block header", &label, input, 1,
+                             valid_deserialize_field)) {
+                ECLIPSE_LOG_INFO(2, "interactive block header deserializer cancelled");
+                return CLI_USAGE;
+            }
         }
         hex = trim(input[0]);
     } else {
@@ -433,9 +493,11 @@ static int deserialize_command(int count, char **args)
     char output[320];
     int status = deserialize_field(hex, output);
     if (status == CLI_OK) {
-        if (count == 0) tui_result("Deserialized block header", output);
+        if (count == 0 && isatty(STDIN_FILENO))
+            tui_result("Deserialized block header", output);
         puts(output);
     }
+    OPENSSL_cleanse(input, sizeof(input));
     return status;
 }
 
@@ -476,18 +538,72 @@ static int math_command(int count, char **args)
     return CLI_USAGE;
 }
 
+static bool parse_scheme(const char *text, eclipse_ml_dsa_scheme_t *out)
+{
+    if (strcmp(text, "44") == 0) *out = ECLIPSE_ML_DSA_44;
+    else if (strcmp(text, "65") == 0) *out = ECLIPSE_ML_DSA_65;
+    else if (strcmp(text, "87") == 0) *out = ECLIPSE_ML_DSA_87;
+    else return false;
+    return true;
+}
+
+static bool parse_role(const char *text, eclipse_wallet_role_t *out)
+{
+    if (strcmp(text, "receive") == 0) *out = ECLIPSE_WALLET_RECEIVE;
+    else if (strcmp(text, "spend") == 0) *out = ECLIPSE_WALLET_SPEND;
+    else return false;
+    return true;
+}
+
+static int ml_dsa_derive_public(int count, char **args)
+{
+    if (count != 3) return CLI_USAGE;
+    eclipse_ml_dsa_scheme_t scheme;
+    uint8_t seed[32];
+    if (!parse_scheme(args[1], &scheme) || !parse_hex(args[2], seed, sizeof(seed))) {
+        OPENSSL_cleanse(seed, sizeof(seed));
+        fputs("Use ml-dsa derive-public 44|65|87 SEED_HEX32.\n", stderr);
+        return CLI_USAGE;
+    }
+    eclipse_ml_dsa_info_t info;
+    if (!eclipse_ml_dsa_info(scheme, &info)) {
+        OPENSSL_cleanse(seed, sizeof(seed));
+        return CLI_ERROR;
+    }
+    uint8_t *public_key = malloc(info.public_key_size);
+    char *hex = malloc(info.public_key_size * 2 + 1);
+    eclipse_ml_dsa_key_t *key = NULL;
+    eclipse_error_t status = public_key == NULL || hex == NULL ?
+                             ECLIPSE_ERROR_OUT_OF_MEMORY :
+                             eclipse_ml_dsa_generate_from_seed(scheme, seed,
+                                                                sizeof(seed), &key);
+    OPENSSL_cleanse(seed, sizeof(seed));
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_ml_dsa_export_public(key, public_key, info.public_key_size);
+    if (status == ECLIPSE_SUCCESS) {
+        format_hex(public_key, info.public_key_size, hex);
+        puts(hex);
+        ECLIPSE_LOG_INFO(2, "seeded ML-DSA public key derived by CLI");
+    } else {
+        ECLIPSE_LOG_ERROR("seeded ML-DSA CLI derivation failed with code %d", status);
+    }
+    eclipse_ml_dsa_key_free(key);
+    free(public_key);
+    free(hex);
+    return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
+}
+
 static int ml_dsa_command(int count, char **args)
 {
+    if (count > 0 && strcmp(args[0], "derive-public") == 0)
+        return ml_dsa_derive_public(count, args);
     ECLIPSE_LOG_INFO(2, "ML-DSA self-test command selected");
     if ((count != 3 && count != 4) || strcmp(args[0], "self-test") != 0) {
         fputs("Use ml-dsa self-test 44|65|87 MESSAGE [CONTEXT].\n", stderr);
         return CLI_USAGE;
     }
     eclipse_ml_dsa_scheme_t scheme;
-    if (strcmp(args[1], "44") == 0) scheme = ECLIPSE_ML_DSA_44;
-    else if (strcmp(args[1], "65") == 0) scheme = ECLIPSE_ML_DSA_65;
-    else if (strcmp(args[1], "87") == 0) scheme = ECLIPSE_ML_DSA_87;
-    else {
+    if (!parse_scheme(args[1], &scheme)) {
         fputs("Scheme must be 44, 65, or 87.\n", stderr);
         return CLI_USAGE;
     }
@@ -547,6 +663,337 @@ static int ml_dsa_command(int count, char **args)
     return CLI_OK;
 }
 
+static int keypair_command(int count, char **args)
+{
+    eclipse_ml_dsa_scheme_t scheme;
+    if (count != 2 || strcmp(args[0], "generate") != 0 ||
+        !parse_scheme(args[1], &scheme)) {
+        fputs("Use keypair generate 44|65|87.\n", stderr);
+        return CLI_USAGE;
+    }
+    eclipse_wallet_keypair_t *pair = NULL;
+    eclipse_error_t status = eclipse_wallet_generate_keypair(scheme, &pair);
+    const uint8_t *bytes = NULL;
+    size_t length = 0;
+    eclipse_ml_dsa_scheme_t actual_scheme;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_wallet_keypair_public(pair, &actual_scheme, &bytes,
+                                               &length);
+    if (status == ECLIPSE_SUCCESS && actual_scheme != scheme)
+        status = ECLIPSE_ERROR_CRYPTO_FAILURE;
+    char *hex = status == ECLIPSE_SUCCESS ? malloc(length * 2 + 1) : NULL;
+    if (status == ECLIPSE_SUCCESS && hex == NULL)
+        status = ECLIPSE_ERROR_OUT_OF_MEMORY;
+    if (status == ECLIPSE_SUCCESS) {
+        format_hex(bytes, length, hex);
+        puts(hex);
+        ECLIPSE_LOG_INFO(2, "standalone wallet keypair generated");
+    } else {
+        ECLIPSE_LOG_ERROR("standalone wallet keypair generation failed with code %d",
+                          status);
+    }
+    free(hex);
+    eclipse_wallet_keypair_free(pair);
+    return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
+}
+
+static int base92_command(int count, char **args)
+{
+    if (count != 2 || (strcmp(args[0], "encode") != 0 &&
+                       strcmp(args[0], "decode") != 0)) {
+        fputs("Use base92 encode HEX or base92 decode TEXT.\n", stderr);
+        return CLI_USAGE;
+    }
+    char piped[8192] = {0};
+    const char *input = resolve_input(args[1], piped, sizeof(piped));
+    if (input == NULL || strlen(input) >= sizeof(piped)) {
+        OPENSSL_cleanse(piped, sizeof(piped));
+        return CLI_USAGE;
+    }
+    size_t length = strlen(input);
+    size_t bytes_capacity = length + 2;
+    uint8_t *bytes = OPENSSL_malloc(bytes_capacity);
+    char *result = malloc(bytes_capacity * 2 + 2);
+    if (bytes == NULL || result == NULL) {
+        OPENSSL_clear_free(bytes, bytes_capacity);
+        free(result);
+        OPENSSL_cleanse(piped, sizeof(piped));
+        ECLIPSE_LOG_ERROR("Base92 CLI allocation failed");
+        return CLI_ERROR;
+    }
+    eclipse_error_t status;
+    if (strcmp(args[0], "encode") == 0) {
+        size_t byte_count = length / 2;
+        if (length % 2 != 0 || !parse_hex(input, bytes, byte_count)) {
+            fputs("Base92 encode requires even-length hex.\n", stderr);
+            status = ECLIPSE_ERROR_INVALID_ARGUMENT;
+        } else {
+            size_t written = 0;
+            status = eclipse_base92_encode(bytes, byte_count, result,
+                                            bytes_capacity * 2 + 2, &written);
+            if (status == ECLIPSE_SUCCESS) puts(result);
+        }
+    } else {
+        size_t written = 0;
+        status = eclipse_base92_decode(input, length, bytes, bytes_capacity,
+                                       &written);
+        if (status == ECLIPSE_SUCCESS) {
+            format_hex(bytes, written, result);
+            puts(result);
+        }
+    }
+    OPENSSL_clear_free(bytes, bytes_capacity);
+    OPENSSL_cleanse(result, bytes_capacity * 2 + 2);
+    free(result);
+    OPENSSL_cleanse(piped, sizeof(piped));
+    if (status != ECLIPSE_SUCCESS) {
+        ECLIPSE_LOG_WARNING("Base92 CLI operation rejected with code %d", status);
+        return CLI_USAGE;
+    }
+    ECLIPSE_LOG_INFO(2, "Base92 CLI operation completed");
+    return CLI_OK;
+}
+
+static int particle_command(int count, char **args)
+{
+    bool create = count == 4 && strcmp(args[0], "create") == 0;
+    bool commit = count == 5 && strcmp(args[0], "commit") == 0;
+    bool verify = count == 6 && strcmp(args[0], "verify") == 0;
+    if (!create && !commit && !verify) {
+        fputs("Use particle create|commit|verify with amount and 32-byte hex fields.\n",
+              stderr);
+        return CLI_USAGE;
+    }
+    uint64_t amount;
+    eclipse_particle_t particle = {0};
+    uint8_t supplied[ECLIPSE_PARTICLE_COMMITMENT_SIZE] = {0};
+    if (!parse_unsigned(args[1], UINT64_MAX, &amount) ||
+        !parse_hex(args[2], particle.receive_material,
+                   ECLIPSE_PARTICLE_MATERIAL_SIZE) ||
+        !parse_hex(args[3], particle.spend_authority,
+                   ECLIPSE_PARTICLE_MATERIAL_SIZE) ||
+        (!create && !parse_hex(args[4], particle.randomness,
+                               ECLIPSE_PARTICLE_RANDOMNESS_SIZE)) ||
+        (verify && !parse_hex(args[5], supplied,
+                               ECLIPSE_PARTICLE_COMMITMENT_SIZE))) {
+        eclipse_particle_clear(&particle);
+        ECLIPSE_LOG_WARNING("particle CLI rejected amount or hex field");
+        return CLI_USAGE;
+    }
+    particle.amount = amount;
+    eclipse_error_t status = ECLIPSE_SUCCESS;
+    if (create)
+        status = eclipse_particle_create(amount, particle.receive_material,
+                                         particle.spend_authority, &particle);
+    uint8_t digest[ECLIPSE_PARTICLE_COMMITMENT_SIZE] = {0};
+    bool valid = false;
+    if (status == ECLIPSE_SUCCESS && verify)
+        status = eclipse_particle_verify_commitment(&particle, supplied,
+                                                     sizeof(supplied), &valid);
+    else if (status == ECLIPSE_SUCCESS)
+        status = eclipse_particle_commitment(&particle, digest, sizeof(digest));
+    if (status == ECLIPSE_SUCCESS) {
+        if (verify) {
+            printf("valid=%s\n", valid ? "true" : "false");
+        } else {
+            char commitment_hex[65];
+            format_hex(digest, sizeof(digest), commitment_hex);
+            if (create) {
+                char receive_hex[65], spend_hex[65], randomness_hex[65];
+                format_hex(particle.receive_material, 32, receive_hex);
+                format_hex(particle.spend_authority, 32, spend_hex);
+                format_hex(particle.randomness, 32, randomness_hex);
+                printf("amount=%" PRIu64 "\nreceive_material=%s\n"
+                       "spend_authority=%s\nrandomness=%s\n",
+                       particle.amount, receive_hex, spend_hex, randomness_hex);
+                OPENSSL_cleanse(receive_hex, sizeof(receive_hex));
+                OPENSSL_cleanse(spend_hex, sizeof(spend_hex));
+                OPENSSL_cleanse(randomness_hex, sizeof(randomness_hex));
+            }
+            printf("commitment=%s\n", commitment_hex);
+            OPENSSL_cleanse(commitment_hex, sizeof(commitment_hex));
+        }
+        ECLIPSE_LOG_INFO(2, "particle CLI %s completed", args[0]);
+    } else {
+        ECLIPSE_LOG_ERROR("particle CLI %s failed with code %d", args[0], status);
+    }
+    eclipse_particle_clear(&particle);
+    OPENSSL_cleanse(supplied, sizeof(supplied));
+    OPENSSL_cleanse(digest, sizeof(digest));
+    return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
+}
+
+static const char *scheme_name(eclipse_ml_dsa_scheme_t scheme)
+{
+    if (scheme == ECLIPSE_ML_DSA_44) return "44";
+    if (scheme == ECLIPSE_ML_DSA_65) return "65";
+    if (scheme == ECLIPSE_ML_DSA_87) return "87";
+    return "unknown";
+}
+
+static int print_wallet_public(const eclipse_wallet_public_key_t *key)
+{
+    size_t wire_size = eclipse_wallet_public_serialized_size(key->scheme);
+    size_t capacity = eclipse_base92_encoded_capacity(wire_size);
+    char *text = malloc(capacity);
+    if (text == NULL) return CLI_ERROR;
+    size_t written = 0;
+    eclipse_error_t status = eclipse_wallet_public_to_base92(
+        key, text, capacity, &written);
+    if (status == ECLIPSE_SUCCESS) puts(text);
+    free(text);
+    if (status != ECLIPSE_SUCCESS)
+        ECLIPSE_LOG_ERROR("wallet CLI public-key encoding failed with code %d", status);
+    return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
+}
+
+static bool parse_wallet_slot(const char *text, bool *master, size_t *index)
+{
+    if (strcmp(text, "master") == 0) {
+        *master = true;
+        *index = 0;
+        return true;
+    }
+    uint64_t parsed;
+    if (!parse_unsigned(text, ECLIPSE_WALLET_POOL_SIZE - 1u, &parsed))
+        return false;
+    *master = false;
+    *index = (size_t)parsed;
+    return true;
+}
+
+static int wallet_command(int count, char **args)
+{
+    if (count == 2 && strcmp(args[0], "create") == 0) {
+        eclipse_ml_dsa_scheme_t scheme;
+        if (!parse_scheme(args[1], &scheme)) return CLI_USAGE;
+        eclipse_wallet_recovery_t *root = NULL;
+        eclipse_wallet_t *wallet = NULL;
+        eclipse_error_t status = eclipse_wallet_create(scheme, &root, &wallet);
+        size_t capacity = eclipse_wallet_recovery_export_capacity();
+        char *text = status == ECLIPSE_SUCCESS ? malloc(capacity) : NULL;
+        if (status == ECLIPSE_SUCCESS && text == NULL)
+            status = ECLIPSE_ERROR_OUT_OF_MEMORY;
+        size_t written = 0;
+        if (status == ECLIPSE_SUCCESS)
+            status = eclipse_wallet_recovery_export_base92(root, text, capacity,
+                                                            &written);
+        if (status == ECLIPSE_SUCCESS) puts(text);
+        if (text != NULL) { OPENSSL_cleanse(text, capacity); free(text); }
+        eclipse_wallet_free(wallet);
+        eclipse_wallet_recovery_free(root);
+        if (status != ECLIPSE_SUCCESS)
+            ECLIPSE_LOG_ERROR("wallet CLI creation failed with code %d", status);
+        else ECLIPSE_LOG_INFO(1, "wallet CLI created and explicitly printed a root");
+        return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
+    }
+
+    if (count == 2 && strcmp(args[0], "public-decode") == 0) {
+        char piped[8192] = {0};
+        const char *text = resolve_input(args[1], piped, sizeof(piped));
+        eclipse_wallet_public_key_t key = {0};
+        eclipse_error_t status = text == NULL ? ECLIPSE_ERROR_INVALID_ARGUMENT :
+                                 eclipse_wallet_public_from_base92(text,
+                                                                    strlen(text), &key);
+        if (status == ECLIPSE_SUCCESS) {
+            char *hex = malloc(key.length * 2 + 1);
+            if (hex == NULL) status = ECLIPSE_ERROR_OUT_OF_MEMORY;
+            else {
+                format_hex(key.bytes, key.length, hex);
+                printf("scheme=%s\nlength=%zu\npublic_key=%s\n",
+                       scheme_name(key.scheme), key.length, hex);
+                free(hex);
+            }
+        }
+        OPENSSL_cleanse(piped, sizeof(piped));
+        if (status != ECLIPSE_SUCCESS)
+            ECLIPSE_LOG_WARNING("wallet CLI public decode rejected with code %d", status);
+        return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_USAGE;
+    }
+
+    bool derive = count == 3 && strcmp(args[0], "domain") == 0;
+    bool public_from_root = count == 4 && strcmp(args[0], "public") == 0;
+    bool public_from_domain = count == 4 && strcmp(args[0], "role-public") == 0;
+    bool verify = count == 4 && strcmp(args[0], "verify") == 0;
+    if (!derive && !public_from_root && !public_from_domain && !verify) {
+        fputs("Use wallet create|domain|public|role-public|public-decode|verify.\n",
+              stderr);
+        return CLI_USAGE;
+    }
+
+    eclipse_wallet_role_t role;
+    if (!parse_role(args[2], &role)) return CLI_USAGE;
+    char piped[8192] = {0};
+    const char *secret = resolve_input(args[1], piped, sizeof(piped));
+    if (secret == NULL) {
+        OPENSSL_cleanse(piped, sizeof(piped));
+        return CLI_USAGE;
+    }
+    eclipse_wallet_recovery_t *root = NULL;
+    eclipse_wallet_domain_t *domain = NULL;
+    eclipse_wallet_t *wallet = NULL;
+    eclipse_error_t status;
+    if (public_from_domain)
+        status = eclipse_wallet_domain_import_base92(secret, strlen(secret), &domain);
+    else
+        status = eclipse_wallet_recovery_import_base92(secret, strlen(secret), &root);
+
+    int result = CLI_ERROR;
+    if (status != ECLIPSE_SUCCESS) goto done;
+    if (derive) {
+        status = eclipse_wallet_derive_domain(root, role, &domain);
+        if (status != ECLIPSE_SUCCESS) goto done;
+        size_t capacity = eclipse_wallet_domain_export_capacity();
+        char *text = malloc(capacity);
+        if (text == NULL) { status = ECLIPSE_ERROR_OUT_OF_MEMORY; goto done; }
+        size_t written = 0;
+        status = eclipse_wallet_domain_export_base92(domain, text, capacity,
+                                                      &written);
+        if (status == ECLIPSE_SUCCESS) puts(text);
+        OPENSSL_cleanse(text, capacity);
+        free(text);
+        if (status == ECLIPSE_SUCCESS) result = CLI_OK;
+        goto done;
+    }
+
+    if (public_from_domain) status = eclipse_wallet_open_domain(domain, &wallet);
+    else status = eclipse_wallet_open(root, &wallet);
+    if (status != ECLIPSE_SUCCESS) goto done;
+    if (verify) {
+        uint64_t index;
+        if (!parse_unsigned(args[3], ECLIPSE_WALLET_POOL_SIZE - 1u, &index)) {
+            result = CLI_USAGE;
+            goto done;
+        }
+        bool valid = false;
+        status = eclipse_wallet_verify_child_binding(wallet, role, (size_t)index,
+                                                      &valid);
+        if (status == ECLIPSE_SUCCESS) {
+            printf("valid=%s\n", valid ? "true" : "false");
+            result = CLI_OK;
+        }
+    } else {
+        bool master;
+        size_t index;
+        if (!parse_wallet_slot(args[3], &master, &index)) {
+            result = CLI_USAGE;
+            goto done;
+        }
+        eclipse_wallet_public_key_t key;
+        status = master ? eclipse_wallet_master_public(wallet, role, &key) :
+                          eclipse_wallet_child_public(wallet, role, index, &key);
+        if (status == ECLIPSE_SUCCESS) result = print_wallet_public(&key);
+    }
+done:
+    eclipse_wallet_free(wallet);
+    eclipse_wallet_domain_free(domain);
+    eclipse_wallet_recovery_free(root);
+    OPENSSL_cleanse(piped, sizeof(piped));
+    if (result == CLI_OK) ECLIPSE_LOG_INFO(2, "wallet CLI %s completed", args[0]);
+    else ECLIPSE_LOG_WARNING("wallet CLI %s rejected or failed", args[0]);
+    return result;
+}
+
 static int tui_menu(void)
 {
     if (!tui_begin()) return CLI_USAGE;
@@ -562,14 +1009,15 @@ static int tui_menu(void)
         mvprintw(1, 2, "Eclipse developer CLI");
         mvprintw(3, 2, "1  Serialize a block header");
         mvprintw(4, 2, "2  Deserialize a block header");
-        mvprintw(6, 2, "h  Show all commands    q  Quit");
+        mvprintw(6, 2, "s  Developer shell    h  Show all commands    q  Quit");
         refresh();
         int choice = getch();
-        if (choice == '1' || choice == '2' || choice == 'h' ||
+        if (choice == '1' || choice == '2' || choice == 's' || choice == 'h' ||
             choice == 'q' || choice == 27) {
             endwin();
             if (choice == '1') return serialize_command(0, NULL);
             if (choice == '2') return deserialize_command(0, NULL);
+            if (choice == 's') return eclipse_cli_shell(&pipeline_options);
             if (choice == 'h') usage(stdout);
             return CLI_OK;
         }
@@ -601,6 +1049,18 @@ static int run_command(int count, char **args)
         ECLIPSE_LOG_INFO(1, "ML-DSA command selected");
         return ml_dsa_command(count - 1, args + 1);
     }
+    if (strcmp(command, "keypair") == 0)
+        return keypair_command(count - 1, args + 1);
+    if (strcmp(command, "base92") == 0)
+        return base92_command(count - 1, args + 1);
+    if (strcmp(command, "particle") == 0)
+        return particle_command(count - 1, args + 1);
+    if (strcmp(command, "wallet") == 0)
+        return wallet_command(count - 1, args + 1);
+    if (strcmp(command, "shell") == 0 && count == 1)
+        return eclipse_cli_shell(&pipeline_options);
+    if (strcmp(command, "pipe") == 0 && count == 2)
+        return eclipse_cli_run_pipeline(args[1], &pipeline_options);
 
     char storage[1024];
     char *parts[6];
@@ -635,6 +1095,7 @@ static int run_command(int count, char **args)
 int main(int argc, char **argv)
 {
     int index = 1;
+    pipeline_options.program = argv[0];
     while (index < argc) {
         if (strcmp(argv[index], "--log-level") == 0) {
             uint64_t level;
@@ -649,13 +1110,39 @@ int main(int argc, char **argv)
                 eclipse_log_shutdown();
                 return CLI_USAGE;
             }
+            pipeline_options.log_file = argv[index];
         } else {
             break;
         }
         ++index;
     }
+    pipeline_options.log_level = eclipse_log_get_info_level();
     ECLIPSE_LOG_INFO(1, "CLI command started");
-    int result = run_command(argc - index, argv + index);
+    int result;
+    bool direct_pipeline = false;
+    for (int i = index; i < argc; ++i)
+        if (strcmp(argv[i], "//") == 0 ||
+            (argc - index == 1 && strstr(argv[i], " // ") != NULL))
+            direct_pipeline = true;
+    if (direct_pipeline) {
+        size_t length = 1;
+        for (int i = index; i < argc; ++i) length += strlen(argv[i]) + 1;
+        char *expression = malloc(length);
+        if (expression == NULL) {
+            result = CLI_ERROR;
+        } else {
+            expression[0] = '\0';
+            for (int i = index; i < argc; ++i) {
+                if (i != index) strcat(expression, " ");
+                strcat(expression, argv[i]);
+            }
+            result = eclipse_cli_run_pipeline(expression, &pipeline_options);
+            OPENSSL_cleanse(expression, length);
+            free(expression);
+        }
+    } else {
+        result = run_command(argc - index, argv + index);
+    }
     if (result == CLI_OK) ECLIPSE_LOG_INFO(1, "CLI command completed");
     else ECLIPSE_LOG_WARNING("CLI command failed with exit code %d", result);
     eclipse_log_shutdown();
