@@ -17,12 +17,16 @@ message(STATUS "CPU architecture is selected from target compiler macros; no hos
 find_package(OpenSSL 3.5 REQUIRED COMPONENTS Crypto)
 find_package(Threads REQUIRED)
 find_package(Curses REQUIRED)
+find_package(CURL 7.86 REQUIRED)
 
 add_library(eclipse_core STATIC
     src/core/block/block.c
     src/core/crypto/ml_dsa.c
     src/core/crypto/ml_dsa_math.c
     src/core/encoding/base92.c
+    src/core/net/tcp.c
+    src/core/net/udp.c
+    src/core/net/websocket.c
     src/core/particle/particle.c
     src/core/wallet/keypair.c
     src/core/wallet/recovery.c
@@ -30,7 +34,7 @@ add_library(eclipse_core STATIC
     src/core/log.c
 )
 target_include_directories(eclipse_core PUBLIC src/core)
-target_link_libraries(eclipse_core PUBLIC OpenSSL::Crypto Threads::Threads)
+target_link_libraries(eclipse_core PUBLIC OpenSSL::Crypto Threads::Threads CURL::libcurl)
 
 add_executable(eclipse-cli src/cli/main.c src/cli/pipeline.c src/cli/host_shell.c)
 target_include_directories(eclipse-cli PRIVATE ${CURSES_INCLUDE_DIRS})
@@ -66,6 +70,10 @@ if(BUILD_TESTING)
     add_executable(wallet_test tests/wallet_test.c)
     target_link_libraries(wallet_test PRIVATE eclipse_core)
     add_test(NAME wallet_test COMMAND wallet_test)
+
+    add_executable(net_test tests/net_test.c)
+    target_link_libraries(net_test PRIVATE eclipse_core)
+    add_test(NAME net_test COMMAND net_test)
 
     add_test(NAME cli_test COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:eclipse-cli>

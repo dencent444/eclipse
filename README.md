@@ -1,14 +1,16 @@
 # Eclipse Token (experimental)
 
 The repository currently contains a block-header serialization exercise,
-ML-DSA wrappers, an in-memory wallet key skeleton, and an eclipse-particle
-commitment prototype. There is no transaction or consensus integration yet.
+ML-DSA wrappers, an in-memory wallet key skeleton, an eclipse-particle
+commitment prototype, and transport wrappers. There is no transaction or
+consensus integration yet.
 
 ## Build and test
 
-Requires CMake, ncurses development headers, and OpenSSL 3.5 or later with
-ML-DSA support. The current implementation targets POSIX systems (Linux,
-macOS, and BSD). CMake selects the target compiler and libraries; the C
+Requires CMake, ncurses development headers, libcurl 7.86 or later with
+WebSocket support, and OpenSSL 3.5 or later with ML-DSA support. The current
+implementation targets POSIX systems (Linux, macOS, and BSD). CMake selects
+the target compiler and libraries; the C
 compiler selects the CPU architecture at build time. The project does not add
 `-march=native`, so a binary is not accidentally tied to the build machine.
 
@@ -22,8 +24,25 @@ ctest --test-dir build --output-on-failure
 `build-info` prints the architecture, pointer width, byte order, and OS baked
 into the binary. It uses target compiler macros, which also work when building
 with a CMake cross-compilation toolchain. A cross build still needs OpenSSL and
-ncurses libraries for the target system. The existing block, wallet packet,
-and particle encodings use explicit byte layouts rather than native C structs.
+ncurses, and libcurl libraries for the target system. The existing block,
+wallet packet, and particle encodings use explicit byte layouts rather than
+native C structs.
+
+## Network wrappers
+
+`src/core/net/tcp.h` provides TCP connect, listen, accept, exact send, receive,
+and socket timeouts. `src/core/net/udp.h` provides bound datagram sockets,
+send/receive, numeric sender address, and truncation detection. The WebSocket
+client in `src/core/net/websocket.h` uses libcurl for `ws://` and `wss://`
+upgrade, framing, and default TLS certificate checks. It sends binary frames
+and returns received chunks with frame metadata; the caller must reassemble
+fragmented messages before parsing them. WebSocket server support is not yet
+included because libcurl's WebSocket interface is client-side.
+
+All wrappers log operation type, status, and byte counts without payloads or
+peer addresses. They carry bytes only: no P2P handshake, transaction format,
+Tor routing, authentication, or consensus validation is implemented here.
+The loopback `net_test` checks TCP, UDP, and a local WebSocket upgrade/frame.
 
 ## Developer CLI
 
