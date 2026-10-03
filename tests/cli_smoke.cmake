@@ -68,6 +68,16 @@ if(NOT RESULT EQUAL 0 OR NOT OUTPUT STREQUAL "ML-DSA-44: valid")
     message(FATAL_ERROR "ML-DSA self-test failed: ${RESULT}\n${OUTPUT}\n${ERROR}")
 endif()
 
+# A signed developer transaction can travel through the existing CLI pipe.
+# Decode reports format only; state validation is covered by tx_test.
+execute_process(
+    COMMAND "${CLI}" --log-level 0 "tx demo // tx decode -"
+    RESULT_VARIABLE RESULT OUTPUT_VARIABLE OUTPUT ERROR_VARIABLE ERROR)
+if(NOT RESULT EQUAL 0 OR
+   NOT OUTPUT MATCHES "format_valid=true\ntxid=[0-9a-f]+\nnetwork_id=EVD1\ninputs=1\noutputs=1\nfee=1\noutput\\[0\\].amount=29\noutput\\[0\\].scheme=44")
+    message(FATAL_ERROR "developer transaction CLI pipe failed: ${RESULT}\n${OUTPUT}\n${ERROR}")
+endif()
+
 set(LOG_FILE "${TEST_BINARY_DIR}/cli-smoke.log")
 execute_process(
     COMMAND "${CLI}" --log-level 5 --log-file "${LOG_FILE}"

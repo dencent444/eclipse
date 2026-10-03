@@ -22,6 +22,7 @@ typedef enum {
 typedef struct eclipse_wallet eclipse_wallet_t;
 typedef struct eclipse_wallet_recovery eclipse_wallet_recovery_t;
 typedef struct eclipse_wallet_domain eclipse_wallet_domain_t;
+typedef struct eclipse_tx eclipse_tx_t;
 
 /* A standalone public key. No role, pool index, master key, or certificate is
  * carried in the network representation, to avoid an unnecessary link. */
@@ -93,6 +94,14 @@ eclipse_error_t eclipse_wallet_verify_public_binding(
 eclipse_error_t eclipse_wallet_verify_child_binding(const eclipse_wallet_t *wallet,
                                                      eclipse_wallet_role_t role,
                                                      size_t index, bool *valid);
+
+/* Developer transparent transaction helper: sign one input with a SPEND
+ * child. A receive-only wallet cannot call this successfully. The caller
+ * must still validate the signed transaction against its UTXO state. */
+eclipse_error_t eclipse_wallet_sign_tx_input(const eclipse_wallet_t *wallet,
+                                             size_t spend_child_index,
+                                             eclipse_tx_t *tx,
+                                             size_t input_index);
 
 /* Version 2 developer transport format for ONE public key; not a consensus
  * object. Both forms contain the same public data and SHA-256 checksum.

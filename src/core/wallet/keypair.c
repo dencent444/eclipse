@@ -89,8 +89,9 @@ eclipse_error_t eclipse_wallet_keypair_from_seed(eclipse_ml_dsa_scheme_t scheme,
     return status;
 }
 
-/* Internal signing access for master-child certificates. Public wallet APIs
- * do not expose a transaction-signing operation at this stage. */
+/* Internal signing access for master-child certificates and the developer
+ * transaction adapter. The public wallet API selects spend children without
+ * exposing this opaque private key handle to callers. */
 eclipse_error_t eclipse_wallet_keypair_sign(const eclipse_wallet_keypair_t *pair,
                                             const uint8_t *message, size_t length,
                                             const uint8_t *context, size_t context_length,

@@ -9,6 +9,8 @@
 #include "log.h"
 #include "particle/particle.h"
 #include "platform.h"
+#include "tx/tx.h"
+#include "tx/utxo.h"
 #include "wallet/wallet.h"
 #include "wallet/keypair.h"
 #include "pipeline.h"
@@ -53,6 +55,8 @@ static void usage(FILE *stream)
           "  particle create AMOUNT RECEIVE_HEX32 SPEND_HEX32\n"
           "  particle commit AMOUNT RECEIVE_HEX32 SPEND_HEX32 RANDOM_HEX32\n"
           "  particle verify AMOUNT RECEIVE_HEX32 SPEND_HEX32 RANDOM_HEX32 COMMIT_HEX32\n"
+          "  tx demo                           Build one local signed dev transfer\n"
+          "  tx decode HEX|-                   Inspect one signed dev transaction\n"
           "  wallet create 44|65|87\n"
           "  wallet domain ROOT_BASE92 receive|spend\n"
           "  wallet public ROOT_BASE92 receive|spend master|INDEX\n"
@@ -927,6 +931,138 @@ static bool parse_wallet_slot(const char *text, bool *master, size_t *index)
 /* Developer entry points for recovery, role, and public-key APIs. Root and
  * domain exports are explicit plaintext results on stdout; imported secrets
  * may arrive through '-' stdin and are cleansed from local scratch buffers. */
+/* Build a disposable, fully signed transparent transfer. The fixture UTXO
+ * exists only in this process and the temporary keypairs are freed before
+ * return; stdout carries public wire bytes for `tx decode -`. */
+static int tx_demo(void)
+{
+    eclipse_ml_dsa_key_t *sender = NULL;
+    eclipse_ml_dsa_key_t *receiver = NULL;
+    eclipse_utxo_set_t *state = NULL;
+    eclipse_error_t status = eclipse_ml_dsa_generate(ECLIPSE_ML_DSA_44, &sender);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_ml_dsa_generate(ECLIPSE_ML_DSA_44, &receiver);
+    if (status == ECLIPSE_SUCCESS) status = eclipse_utxo_set_create(&state);
+    if (status != ECLIPSE_SUCCESS) goto done;
+    eclipse_ml_dsa_info_t info;
+    if (!eclipse_ml_dsa_info(ECLIPSE_ML_DSA_44, &info)) {
+        status = ECLIPSE_ERROR_CRYPTO_FAILURE;
+        goto done;
+    }
+    eclipse_tx_output_t funding = {0};
+    funding.amount = 30;
+    funding.scheme = ECLIPSE_ML_DSA_44;
+    funding.public_key_length = info.public_key_size;
+    status = eclipse_ml_dsa_export_public(sender, funding.public_key,
+                                           sizeof(funding.public_key));
+    if (status != ECLIPSE_SUCCESS) goto done;
+    uint8_t funding_id[ECLIPSE_TX_ID_SIZE] = {0};
+    funding_id[0] = 0xd0; /* Only a local fixture identifier. */
+    status = eclipse_utxo_set_seed_dev(state, funding_id, 0, &funding);
+    if (status != ECLIPSE_SUCCESS) goto done;
+    uint8_t receiver_public[ECLIPSE_TX_MAX_PUBLIC_KEY_SIZE];
+    status = eclipse_ml_dsa_export_public(receiver, receiver_public,
+                                           sizeof(receiver_public));
+    if (status != ECLIPSE_SUCCESS) goto done;
+    eclipse_tx_t tx;
+    status = eclipse_tx_init(&tx);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_tx_add_input(&tx, funding_id, 0);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_tx_add_output(&tx, 29, ECLIPSE_ML_DSA_44,
+                                       receiver_public, info.public_key_size);
+    if (status == ECLIPSE_SUCCESS) status = eclipse_tx_set_fee(&tx, 1);
+    if (status == ECLIPSE_SUCCESS) status = eclipse_tx_sign_input(&tx, 0, sender);
+    bool valid = false;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_tx_validate(&tx, state, &valid);
+    if (status == ECLIPSE_SUCCESS && !valid)
+        status = ECLIPSE_ERROR_INVALID_ARGUMENT;
+    uint8_t id[ECLIPSE_TX_ID_SIZE];
+    if (status == ECLIPSE_SUCCESS) status = eclipse_tx_apply(&tx, state, id);
+    uint8_t wire[ECLIPSE_TX_MAX_WIRE_SIZE];
+    size_t wire_length = 0;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_tx_serialize(&tx, wire, sizeof(wire), &wire_length);
+    char *hex = NULL;
+    if (status == ECLIPSE_SUCCESS) {
+        hex = malloc(wire_length * 2 + 1);
+        if (hex == NULL) status = ECLIPSE_ERROR_OUT_OF_MEMORY;
+    }
+    if (status == ECLIPSE_SUCCESS) {
+        format_hex(wire, wire_length, hex);
+        puts(hex);
+        ECLIPSE_LOG_INFO(1, "local signed developer transaction emitted by CLI");
+    }
+    free(hex);
+done:
+    eclipse_utxo_set_free(state);
+    eclipse_ml_dsa_key_free(sender);
+    eclipse_ml_dsa_key_free(receiver);
+    if (status != ECLIPSE_SUCCESS)
+        ECLIPSE_LOG_ERROR("transaction demo failed with code %d", status);
+    return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
+}
+
+/* Decode canonical bytes and show their public fields. Without the UTXO set
+ * this command reports format only; it cannot authenticate inputs or value. */
+static int tx_decode(const char *argument)
+{
+    const size_t text_capacity = ECLIPSE_TX_MAX_WIRE_SIZE * 2u + 2u;
+    char *piped = malloc(text_capacity);
+    uint8_t *wire = malloc(ECLIPSE_TX_MAX_WIRE_SIZE);
+    if (piped == NULL || wire == NULL) {
+        free(piped);
+        free(wire);
+        return CLI_ERROR;
+    }
+    const char *hex = resolve_input(argument, piped, text_capacity);
+    size_t hex_length = hex == NULL ? 0 : strlen(hex);
+    int result = CLI_USAGE;
+    if (hex_length == 0 || (hex_length & 1u) != 0 ||
+        hex_length / 2 > ECLIPSE_TX_MAX_WIRE_SIZE ||
+        !parse_hex(hex, wire, hex_length / 2)) {
+        fputs("Expected one canonical transaction as even-length hex.\n", stderr);
+        goto done;
+    }
+    eclipse_tx_t tx;
+    eclipse_error_t status = eclipse_tx_deserialize(wire, hex_length / 2, &tx);
+    if (status != ECLIPSE_SUCCESS) {
+        ECLIPSE_LOG_WARNING("transaction CLI decode rejected packet");
+        goto done;
+    }
+    uint8_t id[ECLIPSE_TX_ID_SIZE];
+    status = eclipse_tx_id(&tx, id);
+    if (status != ECLIPSE_SUCCESS) {
+        result = CLI_ERROR;
+        goto done;
+    }
+    char id_hex[ECLIPSE_TX_ID_SIZE * 2u + 1u];
+    format_hex(id, sizeof(id), id_hex);
+    printf("format_valid=true\ntxid=%s\nnetwork_id=EVD1\ninputs=%u\noutputs=%u\nfee=%" PRIu64 "\n",
+           id_hex, (unsigned)tx.input_count, (unsigned)tx.output_count, tx.fee);
+    for (size_t i = 0; i < tx.output_count; ++i)
+        printf("output[%zu].amount=%" PRIu64 "\noutput[%zu].scheme=%s\n",
+               i, tx.outputs[i].amount, i, scheme_name(tx.outputs[i].scheme));
+    result = CLI_OK;
+done:
+    /* The wire bytes are public in this transparent experiment, but avoid
+       retaining any stale pipe contents across command invocations. */
+    OPENSSL_cleanse(piped, text_capacity);
+    free(piped);
+    free(wire);
+    return result;
+}
+
+static int tx_command(int count, char **args)
+{
+    if (count == 1 && strcmp(args[0], "demo") == 0) return tx_demo();
+    if (count == 2 && strcmp(args[0], "decode") == 0)
+        return tx_decode(args[1]);
+    fputs("Use tx demo or tx decode HEX|-.\n", stderr);
+    return CLI_USAGE;
+}
+
 static int wallet_command(int count, char **args)
 {
     /* Only this branch creates a new root. Other branches import an existing
@@ -1084,15 +1220,17 @@ static int tui_menu(void)
         mvprintw(1, 2, "Eclipse developer CLI (%s)", host_shell.name);
         mvprintw(3, 2, "1  Serialize a block header");
         mvprintw(4, 2, "2  Deserialize a block header");
+        mvprintw(5, 2, "3  Build a local signed dev transaction");
         mvprintw(6, 2, "s  Shell    i  Shell info    h  Help    q  Quit");
         refresh();
         int choice = getch();
-        if (choice == '1' || choice == '2' || choice == 's' ||
+        if (choice == '1' || choice == '2' || choice == '3' || choice == 's' ||
             choice == 'i' || choice == 'h' ||
             choice == 'q' || choice == 27) {
             endwin();
             if (choice == '1') return serialize_command(0, NULL);
             if (choice == '2') return deserialize_command(0, NULL);
+            if (choice == '3') return tx_demo();
             if (choice == 's') return eclipse_cli_shell(&pipeline_options);
             if (choice == 'i') eclipse_host_shell_print_guide(stdout, host_shell);
             if (choice == 'h') usage(stdout);
@@ -1134,6 +1272,8 @@ static int run_command(int count, char **args)
         return base92_command(count - 1, args + 1);
     if (strcmp(command, "particle") == 0)
         return particle_command(count - 1, args + 1);
+    if (strcmp(command, "tx") == 0)
+        return tx_command(count - 1, args + 1);
     if (strcmp(command, "wallet") == 0)
         return wallet_command(count - 1, args + 1);
     if (strcmp(command, "shell") == 0 && count == 1)

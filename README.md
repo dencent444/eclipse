@@ -2,8 +2,8 @@
 
 The repository currently contains a block-header serialization exercise,
 ML-DSA wrappers, an in-memory wallet key skeleton, an eclipse-particle
-commitment prototype, and transport wrappers. There is no transaction or
-consensus integration yet.
+commitment prototype, a transparent developer transaction with an in-memory
+UTXO set, and transport wrappers. There is no block/consensus integration yet.
 
 ## Build and test
 
@@ -69,6 +69,7 @@ HEX=$(./build/eclipse-cli --log-level 0 serialize 1 2 3 4 "$HASH" "$HASH")
 ./build/eclipse-cli base92 encode 68656c6c6f
 ./build/eclipse-cli particle create 10 "$HASH" "$HASH"
 ./build/eclipse-cli particle commit 10 "$HASH" "$HASH" "$HASH"
+./build/eclipse-cli 'tx demo // tx decode -'
 ./build/eclipse-cli 'serialize(1,2,3,4,0000000000000000000000000000000000000000000000000000000000000000,0000000000000000000000000000000000000000000000000000000000000000) // deserialize // !grep version'
 ./build/eclipse-cli shell
 ./build/eclipse-cli shell-info
@@ -120,6 +121,18 @@ The provisional particle fields and exact commitment bytes are in
 SHA3-256 commitment can be shared. The CLI's `particle create` intentionally
 prints the opening for development inspection only.
 
+`tx demo` creates disposable keys, seeds one local UTXO, signs and validates a
+29-unit transfer with a 1-unit fee, then prints the signed transaction as hex.
+`tx decode HEX|-` checks the packet format and prints its public fields and
+transaction ID. Decoding alone does not establish authorization or value
+conservation; the in-memory UTXO validator does that. The exact developer
+format, signature preimage, and current limits are in [`protocol.md`](protocol.md).
+`eclipse_wallet_sign_tx_input` signs with one spend-domain child; a receive-only
+wallet cannot use that helper. An output must name the selected spend child's
+public key for validation to accept its later spend.
+There is no coinbase emission, persistent state, block integration, or private
+transaction protocol yet.
+
 ## ML-DSA module
 
 `src/core/crypto/ml_dsa.h` exposes ML-DSA-44, ML-DSA-65, and ML-DSA-87
@@ -137,9 +150,9 @@ production cryptography.
 
 Signatures use **Pure ML-DSA** with OpenSSL's default randomized signing. The
 caller provides a context string (up to 255 bytes) for domain separation.
-A future transaction protocol must specify the exact scheme, context, signed
-message bytes, and key format. The enum numbers in this module are local API
-values, not committed consensus identifiers.
+The developer transaction format now fixes its own scheme IDs, context, and
+signed bytes. The ML-DSA enum numbers remain local API values; this format is
+not a committed mainnet consensus specification.
 
 ## Wallet key skeleton
 

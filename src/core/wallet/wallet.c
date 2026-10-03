@@ -1,6 +1,7 @@
 #include "wallet.h"
 #include "keypair_internal.h"
 #include "recovery_internal.h"
+#include "../tx/tx.h"
 #include "../encoding/base92.h"
 #include "../log.h"
 
@@ -369,6 +370,41 @@ eclipse_error_t eclipse_wallet_verify_child_binding(const eclipse_wallet_t *wall
                                                     valid);
     ECLIPSE_LOG_INFO(4, "wallet child binding %s",
                      status == ECLIPSE_SUCCESS && *valid ? "verified" : "rejected");
+    return status;
+}
+
+/* Only the spend pool is reachable here. We reuse the exact signing preimage
+ * and ML-DSA context used by standalone transaction signing, while the
+ * private child key remains inside the wallet's opaque key-pair object. */
+eclipse_error_t eclipse_wallet_sign_tx_input(const eclipse_wallet_t *wallet,
+                                             size_t spend_child_index,
+                                             eclipse_tx_t *tx,
+                                             size_t input_index)
+{
+    if (wallet == NULL || tx == NULL) {
+        ECLIPSE_LOG_WARNING("wallet transaction signing rejected a null argument");
+        return ECLIPSE_ERROR_NULL_POINTER;
+    }
+    if (!wallet->has_spend || spend_child_index >= ECLIPSE_WALLET_POOL_SIZE ||
+        input_index >= tx->input_count) {
+        ECLIPSE_LOG_WARNING("wallet transaction signing requires a spend child and input");
+        return ECLIPSE_ERROR_INVALID_ARGUMENT;
+    }
+    uint8_t message[ECLIPSE_TX_MAX_SIGNING_SIZE];
+    size_t message_length = 0;
+    eclipse_error_t status = eclipse_tx_signing_message(
+        tx, input_index, message, sizeof(message), &message_length);
+    if (status != ECLIPSE_SUCCESS) return status;
+    static const uint8_t context[] = ECLIPSE_TX_SIGNATURE_CONTEXT;
+    eclipse_tx_input_t *input = &tx->inputs[input_index];
+    input->signature_length = 0;
+    status = eclipse_wallet_keypair_sign(
+        wallet->spend.children[spend_child_index], message, message_length,
+        context, sizeof(context) - 1, input->signature,
+        sizeof(input->signature), &input->signature_length);
+    if (status != ECLIPSE_SUCCESS)
+        OPENSSL_cleanse(input->signature, sizeof(input->signature));
+    else ECLIPSE_LOG_INFO(3, "transaction input signed with spend-domain child");
     return status;
 }
 

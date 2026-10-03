@@ -1,8 +1,69 @@
 # Eclipse protocol sketch (developer v0)
 
 This document records implemented bytes and the intended boundaries of the
-experiment. It is **not** a mainnet consensus specification. Changing any
-commitment input or encoding requires a new version and new test vectors.
+experiment. It is **not** a mainnet consensus specification. Changing a
+commitment or transaction encoding requires a new version and test vectors.
+
+## Transparent transaction (developer v0)
+
+This first transaction format is deliberately transparent and independent of
+the private `eclipse-particle` experiment below. It transfers existing UTXOs;
+it does not create money. `eclipse_utxo_set_seed_dev` inserts local test funds
+until coinbase rewards and validated blocks exist. Calling that function is
+not a consensus minting rule.
+
+All integers below are unsigned big-endian. No C struct padding or native
+endianness is serialized. A signed transaction is exactly:
+
+| Part | Encoding |
+| --- | --- |
+| Header | ASCII `ETX0` (4), version `0` (1), network ID ASCII `EVD1` (4), input count (1), output count (1), fee (8) |
+| Each input | previous transaction ID (32), previous output index (4), ML-DSA signature length (2), signature bytes (that length) |
+| Each output | amount (8), scheme ID (1: 44→1, 65→2, 87→3), public-key length (2), public-key bytes (that length) |
+
+Counts must each be 1–8. Every output amount is positive. Key and signature
+lengths must match one of the supported ML-DSA parameter sets; an input's
+signature must specifically match the scheme of its referenced UTXO. Unknown
+versions, network IDs, schemes, repeated inputs, truncated packets and trailing
+bytes are rejected. A complete signed transaction is at most 58,163 bytes.
+
+For input `i`, the Pure ML-DSA signature context is ASCII
+`ECLIPSE/DEV/TX/V0`. The signed message is:
+
+```text
+ASCII("ECLIPSE/DEV/TX/SIGN/V0")
+|| header above
+|| for each input: previous_txid[32] || previous_index_u32be
+|| for each output: amount_u64be || scheme_u8 || key_length_u16be || public_key
+|| input_index_u8
+```
+
+Signatures are excluded from this message, so no signature signs its own
+bytes. The message binds **all** inputs, outputs, the fee, the dev network ID,
+and the input index. The transaction ID is
+`SHA3-256(ASCII("ECLIPSE/DEV/TX/ID/V0") || complete_signed_wire_bytes)`.
+ML-DSA signing is randomized, so re-signing may change the transaction ID.
+The fixed signing-message vector in `tests/tx_test.c` uses a 100-unit input,
+outputs of 60 and 39, a fee of 1, and ML-DSA-44 public keys derived from
+32-byte seeds `01 || 00×31` and `02 || 00×31`. Its message has 2,724 bytes;
+SHA3-256 of those bytes is
+`06a9ab9472e038284d94025b5b45f0bff79730917095fbee01c2530a45c3ee52`.
+
+Validation against an independent UTXO set checks that every input is present
+and unspent, its signature verifies under that output's public key, sums fit
+in `uint64_t`, and `sum(inputs) == sum(outputs) + fee`. Applying a transaction
+first validates and reserves memory, then marks inputs spent and inserts
+outputs under `(transaction ID, output index)`. The in-memory set has no disk
+persistence, block order, concurrent access, reorganization rollback, mempool,
+coinbase reward, or miner fee payout yet. `eclipse-cli tx decode` only checks
+the format because it has no independently validated UTXO set.
+
+The wallet helper signs with a child of the **spend** domain. An output must
+name that child's public key to be spendable by it. The separate receive
+domain currently has no transaction discovery or recipient encryption role.
+This transparent v0 does not provide sender, receiver, amount, or graph privacy.
+The wallet API's role separation is local; this format does not cryptographically
+distinguish a receive public key from a spend public key.
 
 ## Eclipse-particle
 

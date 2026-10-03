@@ -28,6 +28,8 @@ add_library(eclipse_core STATIC
     src/core/net/udp.c
     src/core/net/websocket.c
     src/core/particle/particle.c
+    src/core/tx/tx.c
+    src/core/tx/utxo.c
     src/core/wallet/keypair.c
     src/core/wallet/recovery.c
     src/core/wallet/wallet.c
@@ -74,6 +76,10 @@ if(BUILD_TESTING)
     add_executable(net_test tests/net_test.c)
     target_link_libraries(net_test PRIVATE eclipse_core)
     add_test(NAME net_test COMMAND net_test)
+
+    add_executable(tx_test tests/tx_test.c)
+    target_link_libraries(tx_test PRIVATE eclipse_core)
+    add_test(NAME tx_test COMMAND tx_test)
 
     add_test(NAME cli_test COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:eclipse-cli>
