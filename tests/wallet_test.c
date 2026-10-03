@@ -1,3 +1,5 @@
+/* Recovery and domain tests check deterministic rebuilding, role isolation,
+ * child signatures, and versioned public/secret packet boundaries. */
 #include "wallet/wallet.h"
 
 #include <openssl/crypto.h>

@@ -23,6 +23,8 @@ static const uint8_t kdf_salt[] = "ECLIPSE/DEV/WALLET/V1/HKDF-SHA256";
 static const uint8_t domain_label[] = "ECLIPSE/DEV/WALLET/V1/DOMAIN";
 static const uint8_t key_label[] = "ECLIPSE/DEV/WALLET/V1/KEY";
 
+/* Translate the in-memory enum to its fixed, one-byte developer packet ID.
+ * Zero is deliberately invalid, so import/export can reject unknown schemes. */
 static uint8_t wire_scheme(eclipse_ml_dsa_scheme_t scheme)
 {
     switch (scheme) {
@@ -33,6 +35,7 @@ static uint8_t wire_scheme(eclipse_ml_dsa_scheme_t scheme)
     }
 }
 
+/* Reverse wire_scheme without trusting a packet's scheme byte. */
 static eclipse_ml_dsa_scheme_t scheme_from_wire(uint8_t wire)
 {
     switch (wire) {
@@ -43,11 +46,15 @@ static eclipse_ml_dsa_scheme_t scheme_from_wire(uint8_t wire)
     }
 }
 
+/* Only receive and spend domains are defined in the current wallet version. */
 static bool valid_role(eclipse_wallet_role_t role)
 {
     return role == ECLIPSE_WALLET_RECEIVE || role == ECLIPSE_WALLET_SPEND;
 }
 
+/* Derive one 32-byte child secret from a parent secret and a caller-built info
+ * string. The caller is responsible for choosing a distinct info value for
+ * each role/key slot and for wiping the returned secret after use. */
 static eclipse_error_t derive32(const uint8_t parent[ECLIPSE_WALLET_SECRET_SIZE],
                                 const uint8_t *info, size_t info_length,
                                 uint8_t output[ECLIPSE_WALLET_SECRET_SIZE])
@@ -61,6 +68,8 @@ static eclipse_error_t derive32(const uint8_t parent[ECLIPSE_WALLET_SECRET_SIZE]
     }
     char digest[] = "SHA256";
     int mode = EVP_KDF_HKDF_MODE_EXTRACT_AND_EXPAND;
+    /* The fixed salt separates this wallet from other HKDF uses. The info
+     * bytes below identify the exact domain or key slot being derived. */
     OSSL_PARAM params[] = {
         OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, digest, 0),
         OSSL_PARAM_construct_int(OSSL_KDF_PARAM_MODE, &mode),
@@ -82,6 +91,8 @@ static eclipse_error_t derive32(const uint8_t parent[ECLIPSE_WALLET_SECRET_SIZE]
     return ECLIPSE_SUCCESS;
 }
 
+/* Create the only independently random secret in a recoverable wallet.
+ * Returns an owned root object; no keys are derived or exported here. */
 eclipse_error_t eclipse_wallet_recovery_generate(eclipse_ml_dsa_scheme_t scheme,
                                                  eclipse_wallet_recovery_t **out)
 {
@@ -107,6 +118,8 @@ eclipse_error_t eclipse_wallet_recovery_generate(eclipse_ml_dsa_scheme_t scheme,
     return ECLIPSE_SUCCESS;
 }
 
+/* Derive one role-scoped secret from the recovery root. The role and ML-DSA
+ * scheme are part of HKDF info, so changing either changes the result. */
 eclipse_error_t eclipse_wallet_derive_domain(const eclipse_wallet_recovery_t *recovery,
                                              eclipse_wallet_role_t role,
                                              eclipse_wallet_domain_t **out)
@@ -128,6 +141,7 @@ eclipse_error_t eclipse_wallet_derive_domain(const eclipse_wallet_recovery_t *re
     if (domain == NULL) return ECLIPSE_ERROR_OUT_OF_MEMORY;
     domain->scheme = recovery->scheme;
     domain->role = role;
+    /* Build exact, versioned info bytes; never hash a C struct with padding. */
     uint8_t info[sizeof(domain_label) - 1 + 2];
     memcpy(info, domain_label, sizeof(domain_label) - 1);
     info[sizeof(domain_label) - 1] = wire_scheme(recovery->scheme);
@@ -144,6 +158,9 @@ eclipse_error_t eclipse_wallet_derive_domain(const eclipse_wallet_recovery_t *re
     return ECLIPSE_SUCCESS;
 }
 
+/* Derive an ML-DSA seed inside a role. kind=0 selects the master at index 0;
+ * kind=1 selects a child index. The index is encoded big-endian so two
+ * machines derive the same key independent of their native byte order. */
 eclipse_error_t eclipse_wallet_derive_key_seed(const eclipse_wallet_domain_t *domain,
                                                uint8_t kind, uint32_t index,
                                                uint8_t output[ECLIPSE_WALLET_SECRET_SIZE])
@@ -168,6 +185,7 @@ eclipse_error_t eclipse_wallet_derive_key_seed(const eclipse_wallet_domain_t *do
     return status;
 }
 
+/* Clear and release the only object that owns the full recovery root. */
 void eclipse_wallet_recovery_free(eclipse_wallet_recovery_t *recovery)
 {
     if (recovery == NULL) return;
@@ -175,6 +193,7 @@ void eclipse_wallet_recovery_free(eclipse_wallet_recovery_t *recovery)
     ECLIPSE_LOG_INFO(3, "wallet recovery root erased from its object");
 }
 
+/* Clear and release a role-only secret; it cannot restore the other role. */
 void eclipse_wallet_domain_free(eclipse_wallet_domain_t *domain)
 {
     if (domain == NULL) return;
@@ -182,6 +201,9 @@ void eclipse_wallet_domain_free(eclipse_wallet_domain_t *domain)
     ECLIPSE_LOG_INFO(4, "wallet domain secret erased from its object");
 }
 
+/* Shared encoder for EWRT and EWDM secret packets. The digest is an
+ * accidental-corruption check, not authentication or encryption. Output is
+ * caller-owned plaintext Base92 and must be protected after this call. */
 static eclipse_error_t export_packet(const char magic[4], uint8_t scheme,
                                      uint8_t role, size_t prefix_size,
                                      const uint8_t secret[ECLIPSE_WALLET_SECRET_SIZE],
@@ -202,6 +224,8 @@ static eclipse_error_t export_packet(const char magic[4], uint8_t scheme,
         ECLIPSE_LOG_WARNING("wallet secret export buffer is too small");
         return ECLIPSE_ERROR_BUFFER_TOO_SMALL;
     }
+    /* Fixed packet order: magic, version, scheme, optional role, 32-byte
+     * secret, SHA-256 checksum. Padding in C objects never reaches export. */
     uint8_t packet[DOMAIN_PACKET_SIZE] = {0};
     memcpy(packet, magic, 4);
     packet[4] = 1;
@@ -224,6 +248,8 @@ static eclipse_error_t export_packet(const char magic[4], uint8_t scheme,
     return status;
 }
 
+/* Decode into temporary storage, then validate checksum, format, and role
+ * before copying any secret into the caller's output object. */
 static eclipse_error_t import_packet(const char *text, size_t length,
                                      const char magic[4], size_t prefix_size,
                                      uint8_t *scheme, uint8_t *role,
@@ -244,6 +270,8 @@ static eclipse_error_t import_packet(const char *text, size_t length,
         int digest_ok = EVP_Q_digest(NULL, "SHA2-256", NULL, packet,
                                      packet_size - CHECKSUM_SIZE,
                                      digest, &digest_length) == 1;
+        /* Every byte in the decoded packet must have the one supported
+         * interpretation; malformed or noncanonical text is rejected. */
         if (!digest_ok || decoded != packet_size || digest_length != CHECKSUM_SIZE ||
             CRYPTO_memcmp(digest, packet + packet_size - CHECKSUM_SIZE,
                           CHECKSUM_SIZE) != 0 ||
@@ -265,11 +293,14 @@ static eclipse_error_t import_packet(const char *text, size_t length,
     return status;
 }
 
+/* Return a buffer size including NUL for the fixed-size root packet. */
 size_t eclipse_wallet_recovery_export_capacity(void)
 {
     return eclipse_base92_encoded_capacity(ROOT_PACKET_SIZE);
 }
 
+/* Explicitly export the full recovery root as plaintext Base92. The caller
+ * owns the resulting text and must decide how to store or erase it. */
 eclipse_error_t eclipse_wallet_recovery_export_base92(
     const eclipse_wallet_recovery_t *recovery, char *output, size_t capacity,
     size_t *written)
@@ -286,6 +317,8 @@ eclipse_error_t eclipse_wallet_recovery_export_base92(
     return status;
 }
 
+/* Import an EWRT packet after the shared decoder validates all fields.
+ * The caller receives a new owned root only on success. */
 eclipse_error_t eclipse_wallet_recovery_import_base92(
     const char *text, size_t length, eclipse_wallet_recovery_t **out)
 {
@@ -307,11 +340,13 @@ eclipse_error_t eclipse_wallet_recovery_import_base92(
     return ECLIPSE_SUCCESS;
 }
 
+/* Return a buffer size including NUL for the role-only packet. */
 size_t eclipse_wallet_domain_export_capacity(void)
 {
     return eclipse_base92_encoded_capacity(DOMAIN_PACKET_SIZE);
 }
 
+/* Export only one derived domain, preserving its scheme and role in EWDM. */
 eclipse_error_t eclipse_wallet_domain_export_base92(
     const eclipse_wallet_domain_t *domain, char *output, size_t capacity,
     size_t *written)
@@ -331,6 +366,7 @@ eclipse_error_t eclipse_wallet_domain_export_base92(
     return status;
 }
 
+/* Import a validated EWDM packet into a role-limited secret object. */
 eclipse_error_t eclipse_wallet_domain_import_base92(
     const char *text, size_t length, eclipse_wallet_domain_t **out)
 {

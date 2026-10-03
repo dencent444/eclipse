@@ -14,6 +14,8 @@ struct eclipse_ml_dsa_key {
     bool has_private;
 };
 
+/* Map only supported local scheme values to OpenSSL provider names. NULL
+ * means the caller must reject the scheme before making a provider call. */
 static const char *algorithm_name(eclipse_ml_dsa_scheme_t scheme)
 {
     switch (scheme) {
@@ -24,6 +26,8 @@ static const char *algorithm_name(eclipse_ml_dsa_scheme_t scheme)
     }
 }
 
+/* Return fixed key/signature byte lengths for one FIPS 204 parameter set.
+ * These lengths are used to validate buffers before touching OpenSSL. */
 bool eclipse_ml_dsa_info(eclipse_ml_dsa_scheme_t scheme,
                          eclipse_ml_dsa_info_t *info)
 {
@@ -43,6 +47,8 @@ bool eclipse_ml_dsa_info(eclipse_ml_dsa_scheme_t scheme,
     return true;
 }
 
+/* Transfer ownership of an EVP_PKEY into our opaque handle. On allocation
+ * failure this helper frees pkey, so callers never own it afterward. */
 static eclipse_error_t wrap_key(eclipse_ml_dsa_scheme_t scheme, EVP_PKEY *pkey,
                                 bool has_private, eclipse_ml_dsa_key_t **out)
 {
@@ -59,6 +65,8 @@ static eclipse_error_t wrap_key(eclipse_ml_dsa_scheme_t scheme, EVP_PKEY *pkey,
     return ECLIPSE_SUCCESS;
 }
 
+/* Generate a fresh ML-DSA keypair with the provider's randomness. The caller
+ * receives an owned opaque handle, never raw secret bytes by default. */
 eclipse_error_t eclipse_ml_dsa_generate(eclipse_ml_dsa_scheme_t scheme,
                                         eclipse_ml_dsa_key_t **out)
 {
@@ -84,6 +92,8 @@ eclipse_error_t eclipse_ml_dsa_generate(eclipse_ml_dsa_scheme_t scheme,
     return status;
 }
 
+/* Recreate the same ML-DSA keypair from exactly 32 secret seed bytes.
+ * The seed stays owned by the caller and must be wiped by that caller. */
 eclipse_error_t eclipse_ml_dsa_generate_from_seed(eclipse_ml_dsa_scheme_t scheme,
                                                   const uint8_t *seed,
                                                   size_t seed_length,
@@ -128,6 +138,8 @@ eclipse_error_t eclipse_ml_dsa_generate_from_seed(eclipse_ml_dsa_scheme_t scheme
     return status;
 }
 
+/* Import untrusted public bytes: check their exact length, ask the provider
+ * to parse them, then run the provider's public-key validation. */
 eclipse_error_t eclipse_ml_dsa_import_public(eclipse_ml_dsa_scheme_t scheme,
                                              const uint8_t *bytes, size_t length,
                                              eclipse_ml_dsa_key_t **out)
@@ -174,6 +186,7 @@ eclipse_error_t eclipse_ml_dsa_import_public(eclipse_ml_dsa_scheme_t scheme,
     return status;
 }
 
+/* Copy exactly the scheme's public-key size to a caller-owned buffer. */
 eclipse_error_t eclipse_ml_dsa_export_public(const eclipse_ml_dsa_key_t *key,
                                              uint8_t *bytes, size_t capacity)
 {
@@ -201,6 +214,8 @@ eclipse_error_t eclipse_ml_dsa_export_public(const eclipse_ml_dsa_key_t *key,
     return ECLIPSE_SUCCESS;
 }
 
+/* Explicitly export expanded private bytes, never a recovery seed. Reject
+ * public-only handles and wipe the destination if the provider fails. */
 eclipse_error_t eclipse_ml_dsa_export_private(const eclipse_ml_dsa_key_t *key,
                                               uint8_t *bytes, size_t capacity)
 {
@@ -229,6 +244,8 @@ eclipse_error_t eclipse_ml_dsa_export_private(const eclipse_ml_dsa_key_t *key,
     return ECLIPSE_SUCCESS;
 }
 
+/* Release our handle and its provider-owned key. The caller must not use this
+ * key pointer after the release; exported byte copies remain caller-owned. */
 void eclipse_ml_dsa_key_free(eclipse_ml_dsa_key_t *key)
 {
     if (key == NULL) {
@@ -240,11 +257,14 @@ void eclipse_ml_dsa_key_free(eclipse_ml_dsa_key_t *key)
     ECLIPSE_LOG_INFO(5, "ML-DSA key handle released");
 }
 
+/* An empty byte string may be represented by NULL; nonempty data may not. */
 static bool valid_data(const uint8_t *data, size_t length)
 {
     return data != NULL || length == 0;
 }
 
+/* Bind the caller's context to Pure ML-DSA signing and verification. The
+ * non-NULL sentinel represents an empty context for OpenSSL's parameter API. */
 static OSSL_PARAM context_params(const uint8_t *context, size_t length)
 {
     static const uint8_t empty = 0;
@@ -254,6 +274,9 @@ static OSSL_PARAM context_params(const uint8_t *context, size_t length)
                                              length);
 }
 
+/* Sign the original message with a private handle and an explicit context.
+ * A successful call sets signature_length; all validation failures leave it
+ * at zero so callers cannot mistake stale bytes for a new signature. */
 eclipse_error_t eclipse_ml_dsa_sign(const eclipse_ml_dsa_key_t *key,
                                     const uint8_t *message, size_t message_length,
                                     const uint8_t *context, size_t context_length,
@@ -312,6 +335,8 @@ eclipse_error_t eclipse_ml_dsa_sign(const eclipse_ml_dsa_key_t *key,
     return ECLIPSE_SUCCESS;
 }
 
+/* Verify with an imported or generated public key. Invalid signatures yield
+ * ECLIPSE_SUCCESS plus valid=false; provider errors return an error code. */
 eclipse_error_t eclipse_ml_dsa_verify(const eclipse_ml_dsa_key_t *key,
                                       const uint8_t *message, size_t message_length,
                                       const uint8_t *context, size_t context_length,

@@ -14,6 +14,9 @@
 
 static const uint8_t binding_context[] = "ECLIPSE/WALLET/CHILD/V1";
 
+/* One role's in-memory keys and local certificates. The signatures are kept
+ * separately from the public-key packet so publishing several keys does not
+ * automatically reveal that they share a master. */
 typedef struct {
     eclipse_wallet_keypair_t *master;
     eclipse_wallet_keypair_t *children[ECLIPSE_WALLET_POOL_SIZE];
@@ -29,6 +32,7 @@ struct eclipse_wallet {
     wallet_pool_t spend;
 };
 
+/* Packet IDs are fixed bytes, distinct from the C enum representation. */
 static uint8_t wire_scheme(eclipse_ml_dsa_scheme_t scheme)
 {
     switch (scheme) {
@@ -39,6 +43,7 @@ static uint8_t wire_scheme(eclipse_ml_dsa_scheme_t scheme)
     }
 }
 
+/* Decode one known EWPK scheme byte; zero marks an unsupported packet. */
 static eclipse_ml_dsa_scheme_t scheme_from_wire(uint8_t wire)
 {
     switch (wire) {
@@ -49,6 +54,8 @@ static eclipse_ml_dsa_scheme_t scheme_from_wire(uint8_t wire)
     }
 }
 
+/* Return only a role that was actually derived in this wallet object.
+ * A receive-only wallet must never expose the absent spend pool. */
 static const wallet_pool_t *role_pool(const eclipse_wallet_t *wallet,
                                       eclipse_wallet_role_t role)
 {
@@ -59,6 +66,8 @@ static const wallet_pool_t *role_pool(const eclipse_wallet_t *wallet,
     return NULL;
 }
 
+/* Release a partially or fully initialized pool; calloc makes missing slots
+ * NULL, so this is also safe during error cleanup. */
 static void pool_free(wallet_pool_t *pool)
 {
     for (size_t i = 0; i < ECLIPSE_WALLET_POOL_SIZE; ++i) {
@@ -68,6 +77,7 @@ static void pool_free(wallet_pool_t *pool)
     eclipse_wallet_keypair_free(pool->master);
 }
 
+/* Copy a borrowed public-key view into a standalone caller-owned value. */
 static eclipse_error_t public_from_pair(const eclipse_wallet_keypair_t *pair,
                                          eclipse_wallet_public_key_t *out)
 {
@@ -86,6 +96,8 @@ static eclipse_error_t public_from_pair(const eclipse_wallet_keypair_t *pair,
     return ECLIPSE_SUCCESS;
 }
 
+/* Construct the exact bytes signed by a role master for one child. A role,
+ * index, scheme, or key change must produce a different signed message. */
 static eclipse_error_t binding_message(const eclipse_wallet_public_key_t *child,
                                         eclipse_wallet_role_t role, size_t index,
                                         uint8_t *message, size_t *length)
@@ -110,6 +122,11 @@ static eclipse_error_t binding_message(const eclipse_wallet_public_key_t *child,
     return ECLIPSE_SUCCESS;
 }
 
+/* Rebuild one role deterministically from its domain secret:
+ * 1. Derive and instantiate the master ML-DSA key.
+ * 2. Derive each of 24 indexed child keys.
+ * 3. Sign each child's binding with the role master.
+ * Temporary 32-byte seeds are wiped after each generation step. */
 static eclipse_error_t pool_derive(wallet_pool_t *pool,
                                    const eclipse_wallet_domain_t *domain)
 {
@@ -155,6 +172,8 @@ static eclipse_error_t pool_derive(wallet_pool_t *pool,
     return ECLIPSE_SUCCESS;
 }
 
+/* Generate a fresh recovery root and open both role pools from it. The root
+ * is returned separately and is not retained inside the wallet handle. */
 eclipse_error_t eclipse_wallet_create(eclipse_ml_dsa_scheme_t scheme,
                                       eclipse_wallet_recovery_t **recovery_out,
                                       eclipse_wallet_t **wallet_out)
@@ -178,6 +197,8 @@ eclipse_error_t eclipse_wallet_create(eclipse_ml_dsa_scheme_t scheme,
     return ECLIPSE_SUCCESS;
 }
 
+/* Reconstruct both receive and spend pools from an existing root. A failure
+ * must free both temporary domains and any partially built wallet. */
 eclipse_error_t eclipse_wallet_open(const eclipse_wallet_recovery_t *recovery,
                                     eclipse_wallet_t **out)
 {
@@ -228,6 +249,8 @@ eclipse_error_t eclipse_wallet_open(const eclipse_wallet_recovery_t *recovery,
     return ECLIPSE_SUCCESS;
 }
 
+/* Build exactly one role from an exported domain secret. No recovery root or
+ * other role is present in the resulting wallet object. */
 eclipse_error_t eclipse_wallet_open_domain(const eclipse_wallet_domain_t *domain,
                                            eclipse_wallet_t **out)
 {
@@ -257,6 +280,8 @@ eclipse_error_t eclipse_wallet_open_domain(const eclipse_wallet_domain_t *domain
     return ECLIPSE_SUCCESS;
 }
 
+/* Release both pools, including a partially initialized role. The recovery
+ * root lives in a separate object and is not owned by this handle. */
 void eclipse_wallet_free(eclipse_wallet_t *wallet)
 {
     if (wallet == NULL) return;
@@ -266,6 +291,7 @@ void eclipse_wallet_free(eclipse_wallet_t *wallet)
     ECLIPSE_LOG_INFO(3, "wallet key pools released");
 }
 
+/* Return a copy of one role's master public key, rejecting absent roles. */
 eclipse_error_t eclipse_wallet_master_public(const eclipse_wallet_t *wallet,
                                               eclipse_wallet_role_t role,
                                               eclipse_wallet_public_key_t *out)
@@ -285,6 +311,8 @@ eclipse_error_t eclipse_wallet_master_public(const eclipse_wallet_t *wallet,
     return status;
 }
 
+/* Return a copy of one indexed child public key. An index outside the
+ * 24-element pool is an argument error, not an empty key. */
 eclipse_error_t eclipse_wallet_child_public(const eclipse_wallet_t *wallet,
                                              eclipse_wallet_role_t role,
                                              size_t index,
@@ -305,6 +333,8 @@ eclipse_error_t eclipse_wallet_child_public(const eclipse_wallet_t *wallet,
     return status;
 }
 
+/* Recheck this wallet's stored child certificate using the public verifier.
+ * This proves a master signed the key/slot tuple, not that a coin is spendable. */
 eclipse_error_t eclipse_wallet_verify_child_binding(const eclipse_wallet_t *wallet,
                                                      eclipse_wallet_role_t role,
                                                      size_t index, bool *valid)
@@ -339,6 +369,8 @@ eclipse_error_t eclipse_wallet_verify_child_binding(const eclipse_wallet_t *wall
     return status;
 }
 
+/* Copy a child's master signature into caller-owned storage. The signature
+ * is deliberately not included in the standalone EWPK public packet. */
 eclipse_error_t eclipse_wallet_child_binding_signature(
     const eclipse_wallet_t *wallet, eclipse_wallet_role_t role, size_t index,
     uint8_t *output, size_t capacity, size_t *written)
@@ -357,6 +389,8 @@ eclipse_error_t eclipse_wallet_child_binding_signature(
     return ECLIPSE_SUCCESS;
 }
 
+/* Verify a certificate using only public inputs. No private wallet object is
+ * needed, but callers must choose whether publishing the certificate is safe. */
 eclipse_error_t eclipse_wallet_verify_public_binding(
     const eclipse_wallet_public_key_t *master,
     const eclipse_wallet_public_key_t *child,
@@ -398,6 +432,7 @@ eclipse_error_t eclipse_wallet_verify_public_binding(
     return status;
 }
 
+/* Determine the exact EWPK packet length from a known ML-DSA scheme. */
 size_t eclipse_wallet_public_serialized_size(eclipse_ml_dsa_scheme_t scheme)
 {
     eclipse_ml_dsa_info_t info;
@@ -405,6 +440,8 @@ size_t eclipse_wallet_public_serialized_size(eclipse_ml_dsa_scheme_t scheme)
     return PUBLIC_PACKET_HEADER_SIZE + info.public_key_size;
 }
 
+/* Write one versioned EWPK packet: magic, version, scheme, big-endian length,
+ * then exact public bytes. Validate the supplied public key before emission. */
 eclipse_error_t eclipse_wallet_public_serialize(const eclipse_wallet_public_key_t *key,
                                                  uint8_t *output, size_t capacity,
                                                  size_t *written)
@@ -445,6 +482,8 @@ eclipse_error_t eclipse_wallet_public_serialize(const eclipse_wallet_public_key_
     return ECLIPSE_SUCCESS;
 }
 
+/* Parse an untrusted EWPK packet into a temporary object. Assign *out only
+ * after the header, declared size, and ML-DSA public bytes all validate. */
 eclipse_error_t eclipse_wallet_public_deserialize(const uint8_t *input, size_t length,
                                                    eclipse_wallet_public_key_t *out)
 {
@@ -480,6 +519,8 @@ eclipse_error_t eclipse_wallet_public_deserialize(const uint8_t *input, size_t l
     return ECLIPSE_SUCCESS;
 }
 
+/* Serialize a validated EWPK packet, then present those public bytes as
+ * Base92 text. No role or master certificate is added during conversion. */
 eclipse_error_t eclipse_wallet_public_to_base92(const eclipse_wallet_public_key_t *key,
                                                  char *output, size_t capacity,
                                                  size_t *written)
@@ -495,6 +536,8 @@ eclipse_error_t eclipse_wallet_public_to_base92(const eclipse_wallet_public_key_
     return eclipse_base92_encode(raw, raw_length, output, capacity, written);
 }
 
+/* Decode Base92 into temporary bytes and run the EWPK parser before exposing
+ * a public key object to the caller. */
 eclipse_error_t eclipse_wallet_public_from_base92(const char *text, size_t length,
                                                    eclipse_wallet_public_key_t *out)
 {

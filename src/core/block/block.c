@@ -18,6 +18,8 @@ static void write_big_endian(uint8_t *buffer, uint64_t value, size_t width)
     }
 }
 
+/* Reconstruct a 4- or 8-byte unsigned value from protocol-order bytes.
+ * Shifting one byte at a time avoids host-endianness and alignment concerns. */
 static uint64_t read_big_endian(const uint8_t *buffer, size_t width)
 {
     uint64_t value = 0;
@@ -33,6 +35,8 @@ static uint64_t read_big_endian(const uint8_t *buffer, size_t width)
     return value;
 }
 
+/* Write the v1 header wire layout. Check the accessible output length first,
+ * then write each field at a fixed offset; C struct padding is irrelevant. */
 eclipse_error_t eclipse_block_header_serialize(
     const eclipse_block_header_t *header, uint8_t *buffer, size_t buffer_size)
 {
@@ -60,6 +64,8 @@ eclipse_error_t eclipse_block_header_serialize(
     return ECLIPSE_SUCCESS;
 }
 
+/* Read one untrusted v1 header after verifying its full 88-byte length.
+ * This decodes fields only; block validity and PoW are future responsibilities. */
 eclipse_error_t eclipse_block_header_deserialize(
     const uint8_t *buffer, eclipse_block_header_t *header, size_t buffer_size)
 {

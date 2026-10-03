@@ -1,4 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
+/* Logger contract: severity filtering, source locations, concurrent writes,
+ * and file permissions must work without exposing sensitive input. */
 #include "log.h"
 #include "block/block.h"
 #include "crypto/ml_dsa.h"

@@ -16,6 +16,8 @@ static FILE *log_stream = NULL; /* NULL means stderr. */
 static FILE *owned_stream = NULL;
 static unsigned info_verbosity = 1;
 
+/* INFO is a volume filter only. Severity WARNING/ERROR/SECURITY is never
+ * suppressed by this setting, and consensus behavior must not depend on it. */
 eclipse_error_t eclipse_log_set_info_level(unsigned level)
 {
     if (level > 5) return ECLIPSE_ERROR_INVALID_ARGUMENT;
@@ -25,6 +27,7 @@ eclipse_error_t eclipse_log_set_info_level(unsigned level)
     return ECLIPSE_SUCCESS;
 }
 
+/* Read the current volume setting under the same mutex used by writers. */
 unsigned eclipse_log_get_info_level(void)
 {
     pthread_mutex_lock(&log_mutex);
@@ -33,6 +36,7 @@ unsigned eclipse_log_get_info_level(void)
     return level;
 }
 
+/* Cheap caller-side INFO check; it does not replace write-time filtering. */
 bool eclipse_log_info_enabled(unsigned level)
 {
     if (level < 1 || level > 5) return false;
@@ -42,6 +46,8 @@ bool eclipse_log_info_enabled(unsigned level)
     return enabled;
 }
 
+/* Switch to a caller-owned stream. If a previous log file was opened by this
+ * module, close that owned file before replacing the destination. */
 eclipse_error_t eclipse_log_set_stream(FILE *stream)
 {
     if (stream == NULL) return ECLIPSE_ERROR_NULL_POINTER;
@@ -57,6 +63,8 @@ eclipse_error_t eclipse_log_set_stream(FILE *stream)
     return ECLIPSE_SUCCESS;
 }
 
+/* Open an append-only log destination with mode 0600 for newly created files.
+ * Keep the old destination if open/fdopen fails; never log the file contents. */
 eclipse_error_t eclipse_log_set_file(const char *path)
 {
     if (path == NULL) return ECLIPSE_ERROR_NULL_POINTER;
@@ -76,6 +84,7 @@ eclipse_error_t eclipse_log_set_file(const char *path)
     return ECLIPSE_SUCCESS;
 }
 
+/* Restore defaults and close only a destination opened by this logger. */
 void eclipse_log_shutdown(void)
 {
     pthread_mutex_lock(&log_mutex);
@@ -86,6 +95,7 @@ void eclipse_log_shutdown(void)
     pthread_mutex_unlock(&log_mutex);
 }
 
+/* Severity names are fixed text, never built from untrusted messages. */
 static const char *level_label(eclipse_log_level_t level)
 {
     switch (level) {
@@ -97,6 +107,7 @@ static const char *level_label(eclipse_log_level_t level)
     }
 }
 
+/* Keep control characters from turning one event into forged extra lines. */
 static void sanitize_message(char *message)
 {
     /* Keep one event on one line, even if a peer supplies line breaks. */
@@ -105,6 +116,8 @@ static void sanitize_message(char *message)
     }
 }
 
+/* Format one event with UTC time, severity, source location, and a bounded
+ * message. The mutex protects both the destination and uninterrupted lines. */
 eclipse_error_t eclipse_log_write(eclipse_log_level_t level, unsigned info_level,
                                   const char *file, int line, const char *function,
                                   const char *format, ...)

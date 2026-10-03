@@ -1,3 +1,5 @@
+# Exercise commands as subprocesses so stdout, stderr logging, and // pipes
+# are checked the same way a developer uses the compiled executable.
 if(NOT DEFINED CLI OR NOT DEFINED TEST_BINARY_DIR OR
    NOT DEFINED EXPECTED_POINTER_BITS)
     message(FATAL_ERROR "CLI, TEST_BINARY_DIR and EXPECTED_POINTER_BITS are required")

@@ -1,3 +1,5 @@
+/* Codec contract: known vectors, canonical spelling, invalid input, and
+ * output-buffer boundaries must agree for every node using this text format. */
 #include "encoding/base92.h"
 
 #include <stdio.h>

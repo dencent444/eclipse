@@ -1,3 +1,5 @@
+/* Reference ring arithmetic tests include edge values and polynomial cases;
+ * they do not validate or replace OpenSSL's ML-DSA implementation. */
 #include "crypto/ml_dsa_math.h"
 
 #include <limits.h>

@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
+/* Accept both /path/to/shell and a login-shell argv[0] such as -zsh. */
 static const char *basename_of(const char *path)
 {
     const char *slash = strrchr(path, '/');
@@ -12,6 +13,8 @@ static const char *basename_of(const char *path)
     return *name == '-' ? name + 1 : name;
 }
 
+/* Classify only known names. An unfamiliar parent must not be treated as a
+ * shell merely because its name contains a familiar substring. */
 eclipse_host_shell_kind_t eclipse_host_shell_classify(const char *path)
 {
     if (path == NULL || *path == '\0') return ECLIPSE_HOST_SHELL_UNKNOWN;
@@ -40,6 +43,8 @@ static const char *shell_name(eclipse_host_shell_kind_t kind)
     }
 }
 
+/* Prefer the direct parent on Linux; SHELL is a fallback hint because it may
+ * name the user's login shell rather than the process that invoked the CLI. */
 eclipse_host_shell_t eclipse_host_shell_detect(void)
 {
     eclipse_host_shell_t result = {ECLIPSE_HOST_SHELL_UNKNOWN, "unknown", "none"};
@@ -71,6 +76,8 @@ eclipse_host_shell_t eclipse_host_shell_detect(void)
     return result;
 }
 
+/* Give quoting advice for command-line invocations. Raw input through our
+ * own shell/pipe stdin remains the reliable path for arbitrary punctuation. */
 void eclipse_host_shell_print_guide(FILE *stream, eclipse_host_shell_t shell)
 {
     fprintf(stream, "Detected outer shell: %s (%s).\n", shell.name, shell.source);

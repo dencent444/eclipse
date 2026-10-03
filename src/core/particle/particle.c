@@ -14,6 +14,8 @@ static const uint8_t commitment_domain[] = "ECLIPSE/PARTICLE/COMMIT/V1";
                                   ECLIPSE_PARTICLE_MATERIAL_SIZE * 2u + \
                                   ECLIPSE_PARTICLE_RANDOMNESS_SIZE)
 
+/* Build a private opening from caller material and fresh random bytes.
+ * Nothing is written to *out until all input checks and randomness succeed. */
 eclipse_error_t eclipse_particle_create(
     uint64_t amount,
     const uint8_t receive_material[ECLIPSE_PARTICLE_MATERIAL_SIZE],
@@ -42,6 +44,9 @@ eclipse_error_t eclipse_particle_create(
     return ECLIPSE_SUCCESS;
 }
 
+/* Convert the four opening fields to one 130-byte preimage in a fixed order,
+ * then hash it. This derives the public digest; it does not prove ownership,
+ * value conservation, or that the particle exists on a chain. */
 eclipse_error_t eclipse_particle_commitment(const eclipse_particle_t *particle,
                                             uint8_t *output, size_t capacity)
 {
@@ -54,6 +59,8 @@ eclipse_error_t eclipse_particle_commitment(const eclipse_particle_t *particle,
         return ECLIPSE_ERROR_BUFFER_TOO_SMALL;
     }
 
+    /* Assemble bytes explicitly instead of hashing the C struct: padding
+     * and native integer byte order are not part of the protocol format. */
     uint8_t preimage[COMMITMENT_PREIMAGE_SIZE];
     size_t at = 0;
     memcpy(preimage + at, commitment_domain, sizeof(commitment_domain) - 1u);
@@ -90,6 +97,8 @@ eclipse_error_t eclipse_particle_commitment(const eclipse_particle_t *particle,
     return ECLIPSE_SUCCESS;
 }
 
+/* Check that a private opening matches a supplied commitment. This operation
+ * requires the opening and therefore is not a private-spend verification. */
 eclipse_error_t eclipse_particle_verify_commitment(
     const eclipse_particle_t *particle, const uint8_t *commitment,
     size_t commitment_length, bool *valid)
@@ -118,6 +127,8 @@ eclipse_error_t eclipse_particle_verify_commitment(
     return ECLIPSE_SUCCESS;
 }
 
+/* Erase a local opening after its owner has finished using it. This cannot
+ * erase copies already printed, serialized, or retained elsewhere. */
 void eclipse_particle_clear(eclipse_particle_t *particle)
 {
     if (particle == NULL) return;

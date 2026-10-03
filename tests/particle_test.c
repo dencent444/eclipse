@@ -1,3 +1,5 @@
+/* Fix the exact commitment preimage with an independent SHA3-256 vector, then
+ * show that changing any opening field invalidates the public commitment. */
 #include "particle/particle.h"
 
 #include <stdio.h>

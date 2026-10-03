@@ -2,7 +2,9 @@
 #define ERROR_H
 
 
-// error codes
+/* Shared API status codes. ECLIPSE_SUCCESS means the operation ran; callers
+ * must still inspect a separate bool when checking a signature or commitment.
+ * Invalid input and provider/I/O failures remain distinguishable. */
 typedef enum {
     ECLIPSE_SUCCESS = 0,
     ECLIPSE_ERROR_INVALID_ARGUMENT,

@@ -14,6 +14,7 @@ static char base92_char(unsigned value)
     return (char)('a' + value - 62);
 }
 
+/* Reverse the alphabet mapping. -1 is reserved for forbidden characters. */
 static int base92_value(char ch)
 {
     if (ch == '!') return 0;
@@ -22,6 +23,8 @@ static int base92_value(char ch)
     return -1;
 }
 
+/* Compute the output capacity before encoding, including NUL. A zero result
+ * signals size_t overflow; callers must not allocate using that value. */
 size_t eclipse_base92_encoded_capacity(size_t input_length)
 {
     if (input_length == 0) return 2; /* "~" and NUL. */
@@ -33,6 +36,8 @@ size_t eclipse_base92_encoded_capacity(size_t input_length)
     return full_groups * 2 + (remainder == 0 ? 0 : remainder < 7 ? 1 : 2) + 1;
 }
 
+/* Stream input bits into 13-bit groups, then map each group to two base-91
+ * digits. A short final group has its own canonical one/two-digit rule. */
 eclipse_error_t eclipse_base92_encode(const uint8_t *input, size_t input_length,
                                       char *output, size_t capacity,
                                       size_t *written)
@@ -68,6 +73,8 @@ eclipse_error_t eclipse_base92_encode(const uint8_t *input, size_t input_length,
             bits &= ((UINT32_C(1) << bit_count) - 1);
         }
     }
+    /* Preserve the exact number of remaining bits in the final character(s).
+     * The decoder will re-encode and reject alternative spellings. */
     if (bit_count > 0) {
         if (bit_count < 7) {
             output[used++] = base92_char(bits << (6 - bit_count));
@@ -83,6 +90,8 @@ eclipse_error_t eclipse_base92_encode(const uint8_t *input, size_t input_length,
     return ECLIPSE_SUCCESS;
 }
 
+/* Decode untrusted text into temporary bytes and re-encode it to enforce one
+ * spelling per byte string. Only then copy bytes to the caller's output. */
 eclipse_error_t eclipse_base92_decode(const char *text, size_t text_length,
                                       uint8_t *output, size_t capacity,
                                       size_t *written)
@@ -138,6 +147,7 @@ eclipse_error_t eclipse_base92_decode(const char *text, size_t text_length,
                 decoded[used++] = (uint8_t)(bits >> (bit_count - 8));
         }
     }
+    /* Re-encoding detects unused-bit tricks and overlong representations. */
     if (status == ECLIPSE_SUCCESS) {
         size_t canonical_capacity = eclipse_base92_encoded_capacity(used);
         char *canonical = OPENSSL_malloc(canonical_capacity);

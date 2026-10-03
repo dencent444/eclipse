@@ -24,6 +24,8 @@ typedef struct {
     bool external;
 } pipeline_stage_t;
 
+/* Remove surrounding whitespace in the private, mutable copy of a line.
+ * The returned pointer still belongs to that original allocation. */
 static char *trim(char *text)
 {
     while (isspace((unsigned char)*text)) ++text;
@@ -33,6 +35,9 @@ static char *trim(char *text)
     return text;
 }
 
+/* Split a raw Eclipse command line at unquoted // tokens. Parentheses keep
+ * the content of serialize(...) together, so a slash inside a call is data.
+ * Replacing separators with NUL creates borrowed stage slices in one buffer. */
 static bool split_stages(char *line, char **parts, size_t *count)
 {
     *count = 0;
@@ -69,6 +74,9 @@ static bool split_stages(char *line, char **parts, size_t *count)
     return true;
 }
 
+/* Tokenize one stage without invoking a system shell. Quotes and backslashes
+ * only group/escape characters for argv; they never trigger expansion.
+ * A leading ! explicitly selects an external executable. */
 static bool parse_words(char *text, pipeline_stage_t *stage)
 {
     stage->count = 0;
@@ -119,6 +127,9 @@ static bool parse_words(char *text, pipeline_stage_t *stage)
     return stage->count > 0;
 }
 
+/* Replace a forked child with either an external executable or this CLI.
+ * Internal stages inherit logging options but not a copy of raw input in
+ * diagnostic messages, since arguments may contain wallet secrets. */
 static void run_child(const pipeline_stage_t *stage,
                       const eclipse_cli_pipeline_options_t *options)
 {
@@ -145,6 +156,9 @@ static void run_child(const pipeline_stage_t *stage,
     _exit(127);
 }
 
+/* Execute all parsed stages concurrently, wiring stdout of stage N to stdin
+ * of N+1 with OS pipes. Wait for every child and report any failed stage.
+ * The mutable command copy is cleansed even when parsing or execution fails. */
 int eclipse_cli_run_pipeline(const char *line,
                              const eclipse_cli_pipeline_options_t *options)
 {
@@ -164,6 +178,8 @@ int eclipse_cli_run_pipeline(const char *line,
         free(storage);
         return 2;
     }
+    /* Parse every stage before launching children, so a syntax error cannot
+     * leave half of a developer pipeline running. */
     for (size_t i = 0; i < count; ++i) {
         if (!parse_words(parts[i], &stages[i])) {
             ECLIPSE_LOG_WARNING("pipeline stage syntax rejected");
@@ -178,6 +194,8 @@ int eclipse_cli_run_pipeline(const char *line,
     size_t launched = 0;
     int previous_read = -1;
     int result = 0;
+    /* Build a separate pipe for each edge. The parent closes its copies so
+     * readers see EOF when the writer exits rather than waiting forever. */
     for (size_t i = 0; i < count; ++i) {
         int next_pipe[2] = {-1, -1};
         if (i + 1 < count && pipe(next_pipe) != 0) {
@@ -209,6 +227,7 @@ int eclipse_cli_run_pipeline(const char *line,
         previous_read = next_pipe[0];
     }
     if (previous_read >= 0) close(previous_read);
+    /* A later successful filter must not hide an earlier failing producer. */
     for (size_t i = 0; i < launched; ++i) {
         int status = 0;
         pid_t waited;
@@ -226,6 +245,9 @@ int eclipse_cli_run_pipeline(const char *line,
     return result;
 }
 
+/* Read exactly one raw expression after the outer shell has launched us.
+ * This path is useful for punctuation or secret text that should not be put
+ * into shell arguments; the same pipeline parser is used afterward. */
 int eclipse_cli_pipeline_from_stdin(const eclipse_cli_pipeline_options_t *options)
 {
     if (options == NULL) return 2;
@@ -250,6 +272,9 @@ int eclipse_cli_pipeline_from_stdin(const eclipse_cli_pipeline_options_t *option
     return result;
 }
 
+/* Developer REPL: read raw lines, execute each as an Eclipse pipeline, and
+ * keep the last command status. Prompts appear only on an actual terminal,
+ * so scripted stdin remains clean and machine-readable. */
 int eclipse_cli_shell(const eclipse_cli_pipeline_options_t *options)
 {
     if (options == NULL) return 2;

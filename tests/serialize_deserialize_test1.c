@@ -1,3 +1,5 @@
+/* Fixed block-header wire vectors and error paths guard byte-for-byte
+ * agreement between independent nodes on different host architectures. */
 #include "../src/core/block/block.h"
 
 #include <inttypes.h>

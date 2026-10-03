@@ -30,6 +30,8 @@ enum { CLI_OK = 0, CLI_ERROR = 1, CLI_USAGE = 2 };
 static eclipse_cli_pipeline_options_t pipeline_options;
 static eclipse_host_shell_t host_shell;
 
+/* Print the implemented command surface and guidance for the detected outer
+ * shell. Help is output only; it never executes a command or exposes keys. */
 static void usage(FILE *stream)
 {
     fputs("Usage: eclipse-cli [--log-level 0..5] [--log-file PATH] [COMMAND]\n"
@@ -76,6 +78,7 @@ static void usage(FILE *stream)
     eclipse_host_shell_print_guide(stream, host_shell);
 }
 
+/* Trim a mutable field in place and return a pointer inside its buffer. */
 static char *trim(char *text)
 {
     while (isspace((unsigned char)*text)) ++text;
@@ -85,6 +88,8 @@ static char *trim(char *text)
     return text;
 }
 
+/* Parse a whole unsigned number and enforce the field's maximum. Decimal is
+ * the default, and only an explicit 0x prefix selects hexadecimal. */
 static bool parse_unsigned(const char *text, uint64_t maximum, uint64_t *out)
 {
     /* Base 10 by default avoids strtoull's surprising leading-zero octal
@@ -100,6 +105,7 @@ static bool parse_unsigned(const char *text, uint64_t maximum, uint64_t *out)
     return true;
 }
 
+/* Signed decimal parser used by the educational modular-arithmetic command. */
 static bool parse_signed(const char *text, int64_t *out)
 {
     if (*text == '\0') return false;
@@ -111,6 +117,7 @@ static bool parse_signed(const char *text, int64_t *out)
     return true;
 }
 
+/* Map one ASCII hex character to 0..15, or -1 for invalid input. */
 static int hex_digit(char ch)
 {
     if (ch >= '0' && ch <= '9') return ch - '0';
@@ -119,6 +126,8 @@ static int hex_digit(char ch)
     return -1;
 }
 
+/* Decode exactly bytes*2 hex characters. A field with a suffix or missing
+ * digits is rejected rather than silently accepted. */
 static bool parse_hex(const char *hex, uint8_t *out, size_t bytes)
 {
     /* Exact length matters: silently accepting a suffix would conceal a
@@ -133,6 +142,9 @@ static bool parse_hex(const char *hex, uint8_t *out, size_t bytes)
     return true;
 }
 
+/* Read one piped value, trim it, and reject extra non-whitespace stdin.
+ * This keeps a secret root or packet from accidentally swallowing a second
+ * value that the receiving command would otherwise ignore. */
 static bool read_stream_token(char *buffer, size_t capacity)
 {
     if (capacity < 2 || fgets(buffer, (int)capacity, stdin) == NULL) return false;
@@ -149,6 +161,8 @@ static bool read_stream_token(char *buffer, size_t capacity)
     return true;
 }
 
+/* A literal '-' means one value should come from stdin. The returned pointer
+ * is borrowed from argv or buffer; the caller must cleanse buffer afterward. */
 static const char *resolve_input(const char *argument, char *buffer, size_t capacity)
 {
     if (strcmp(argument, "-") != 0) return argument;
@@ -159,6 +173,7 @@ static const char *resolve_input(const char *argument, char *buffer, size_t capa
     return buffer;
 }
 
+/* Give field-specific feedback before the user leaves the ncurses form. */
 static bool valid_serialize_field(size_t index, const char *text)
 {
     /* Immediate TUI feedback is separate from serialize_fields' final check:
@@ -175,6 +190,7 @@ static bool valid_serialize_field(size_t index, const char *text)
     return parse_hex(value, hash, sizeof(hash));
 }
 
+/* The interactive deserializer expects one complete 88-byte header in hex. */
 static bool valid_deserialize_field(size_t index, const char *text)
 {
     (void)index;
@@ -184,7 +200,8 @@ static bool valid_deserialize_field(size_t index, const char *text)
     return parse_hex(trim(copy), header, sizeof(header));
 }
 
-/* The binary header remains the source of truth; this is presentation only. */
+/* The binary header remains the source of truth; this is presentation only.
+ * The caller allocates at least 2*length+1 bytes for output. */
 static void format_hex(const uint8_t *bytes, size_t length, char *output)
 {
     static const char digits[] = "0123456789abcdef";
@@ -195,6 +212,8 @@ static void format_hex(const uint8_t *bytes, size_t length, char *output)
     output[2 * length] = '\0';
 }
 
+/* Start ncurses only for genuine terminals. Positional commands keep stdout
+ * free of terminal control sequences so they can be used in pipelines. */
 static bool tui_begin(void)
 {
     /* Keep scriptable commands free of ncurses control sequences. */
@@ -223,6 +242,7 @@ static bool tui_begin(void)
     return true;
 }
 
+/* Pause an active form until the terminal is large enough or Esc cancels. */
 static bool tui_wait_for_resize(void)
 {
     if (LINES >= 8 && COLS >= 60) return true;
@@ -232,6 +252,8 @@ static bool tui_wait_for_resize(void)
     return getch() != 27;
 }
 
+/* Walk through form fields one at a time. Invalid input stays on screen for
+ * correction, while Esc cancels the form without calling any core API. */
 static bool tui_collect(const char *title, const char **labels,
                         char fields[][256], size_t count,
                         bool (*valid_field)(size_t, const char *))
@@ -291,6 +313,8 @@ static bool tui_collect(const char *title, const char **labels,
     return true;
 }
 
+/* Show a potentially long result in a scrollable ncurses viewport. The
+ * caller also prints the same result to stdout after the UI closes. */
 static void tui_result(const char *title, const char *result)
 {
     if (!tui_begin()) return;
@@ -333,6 +357,8 @@ static void tui_result(const char *title, const char *result)
     endwin();
 }
 
+/* Parse the convenient name(a,b,...) form into a bounded, mutable copy.
+ * Only the expected number of nonempty fields is accepted. */
 static bool parse_call(const char *command, const char *name,
                        char *storage, size_t capacity, char **parts,
                        size_t expected)
@@ -365,6 +391,8 @@ static bool parse_call(const char *command, const char *name,
     return true;
 }
 
+/* Validate six text fields, build a header object, then call the real binary
+ * serializer. The CLI owns presentation, while block.c owns wire bytes. */
 static int serialize_fields(char **fields, char output[177])
 {
     /* Validate every field before calling the protocol serializer. */
@@ -404,6 +432,8 @@ static int serialize_fields(char **fields, char output[177])
     return CLI_OK;
 }
 
+/* Choose positional fields or a six-step ncurses form, then use the same
+ * serializer in either path so their validation rules cannot diverge. */
 static int serialize_command(int count, char **args)
 {
     if (count != 0 && count != 6) {
@@ -436,6 +466,8 @@ static int serialize_command(int count, char **args)
     return status;
 }
 
+/* Decode a complete hex header through block.c, then format named fields for
+ * humans. This function does not decide whether the block is consensus-valid. */
 static int deserialize_field(const char *hex, char output[320])
 {
     ECLIPSE_LOG_INFO(3, "validating serialized block header input");
@@ -470,6 +502,8 @@ static int deserialize_field(const char *hex, char output[320])
     return CLI_OK;
 }
 
+/* Accept one positional hex value, a piped line, or an interactive form.
+ * The piped path never initializes ncurses or adds control bytes to stdout. */
 static int deserialize_command(int count, char **args)
 {
     if (count != 0 && count != 1) {
@@ -509,6 +543,8 @@ static int deserialize_command(int count, char **args)
     return status;
 }
 
+/* Small inspection surface for the project's existing ML-DSA ring helpers.
+ * It handles integers only; polynomial routines remain covered by C tests. */
 static int math_command(int count, char **args)
 {
     ECLIPSE_LOG_INFO(2, "modular arithmetic command selected");
@@ -546,6 +582,7 @@ static int math_command(int count, char **args)
     return CLI_USAGE;
 }
 
+/* Map user-facing 44/65/87 names to the local API enum. */
 static bool parse_scheme(const char *text, eclipse_ml_dsa_scheme_t *out)
 {
     if (strcmp(text, "44") == 0) *out = ECLIPSE_ML_DSA_44;
@@ -555,6 +592,7 @@ static bool parse_scheme(const char *text, eclipse_ml_dsa_scheme_t *out)
     return true;
 }
 
+/* Only the two currently implemented wallet domains are user-selectable. */
 static bool parse_role(const char *text, eclipse_wallet_role_t *out)
 {
     if (strcmp(text, "receive") == 0) *out = ECLIPSE_WALLET_RECEIVE;
@@ -563,6 +601,8 @@ static bool parse_role(const char *text, eclipse_wallet_role_t *out)
     return true;
 }
 
+/* Deterministically derive a public key from an explicit 32-byte test seed.
+ * The seed is never logged and its parsed stack copy is wiped before return. */
 static int ml_dsa_derive_public(int count, char **args)
 {
     if (count != 3) return CLI_USAGE;
@@ -601,6 +641,8 @@ static int ml_dsa_derive_public(int count, char **args)
     return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
 }
 
+/* Exercise the ML-DSA wrappers end to end: generate, export/import public,
+ * sign with the private key, then verify with the imported public handle. */
 static int ml_dsa_command(int count, char **args)
 {
     if (count > 0 && strcmp(args[0], "derive-public") == 0)
@@ -671,6 +713,8 @@ static int ml_dsa_command(int count, char **args)
     return CLI_OK;
 }
 
+/* Generate the standalone wallet-keypair wrapper and print only public bytes.
+ * The opaque private handle is released before this CLI process exits. */
 static int keypair_command(int count, char **args)
 {
     eclipse_ml_dsa_scheme_t scheme;
@@ -705,6 +749,8 @@ static int keypair_command(int count, char **args)
     return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
 }
 
+/* Convert explicit hex or Base92 text through the core codec. A '-' argument
+ * accepts piped data, and temporary decoded bytes are cleared on exit. */
 static int base92_command(int count, char **args)
 {
     if (count != 2 || (strcmp(args[0], "encode") != 0 &&
@@ -762,6 +808,9 @@ static int base92_command(int count, char **args)
     return CLI_OK;
 }
 
+/* Expose particle create/commit/verify without inventing transactions.
+ * `create` intentionally prints the private opening for development tests;
+ * no secret field is included in logger messages. */
 static int particle_command(int count, char **args)
 {
     bool create = count == 4 && strcmp(args[0], "create") == 0;
@@ -790,6 +839,8 @@ static int particle_command(int count, char **args)
     }
     particle.amount = amount;
     eclipse_error_t status = ECLIPSE_SUCCESS;
+    /* `create` obtains new randomness; `commit`/`verify` use the exact opening
+     * supplied by the developer, which makes fixed vectors reproducible. */
     if (create)
         status = eclipse_particle_create(amount, particle.receive_material,
                                          particle.spend_authority, &particle);
@@ -831,6 +882,7 @@ static int particle_command(int count, char **args)
     return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
 }
 
+/* Stable display names for the supported ML-DSA schemes. */
 static const char *scheme_name(eclipse_ml_dsa_scheme_t scheme)
 {
     if (scheme == ECLIPSE_ML_DSA_44) return "44";
@@ -839,6 +891,7 @@ static const char *scheme_name(eclipse_ml_dsa_scheme_t scheme)
     return "unknown";
 }
 
+/* Encode one standalone public key as the existing EWPK Base92 packet. */
 static int print_wallet_public(const eclipse_wallet_public_key_t *key)
 {
     size_t wire_size = eclipse_wallet_public_serialized_size(key->scheme);
@@ -855,6 +908,7 @@ static int print_wallet_public(const eclipse_wallet_public_key_t *key)
     return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
 }
 
+/* Select the role master or one of the fixed 24 child indices. */
 static bool parse_wallet_slot(const char *text, bool *master, size_t *index)
 {
     if (strcmp(text, "master") == 0) {
@@ -870,8 +924,13 @@ static bool parse_wallet_slot(const char *text, bool *master, size_t *index)
     return true;
 }
 
+/* Developer entry points for recovery, role, and public-key APIs. Root and
+ * domain exports are explicit plaintext results on stdout; imported secrets
+ * may arrive through '-' stdin and are cleansed from local scratch buffers. */
 static int wallet_command(int count, char **args)
 {
+    /* Only this branch creates a new root. Other branches import an existing
+     * root or role secret and never regenerate it behind the user's back. */
     if (count == 2 && strcmp(args[0], "create") == 0) {
         eclipse_ml_dsa_scheme_t scheme;
         if (!parse_scheme(args[1], &scheme)) return CLI_USAGE;
@@ -896,6 +955,7 @@ static int wallet_command(int count, char **args)
         return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
     }
 
+    /* A public packet can be inspected without importing any secret. */
     if (count == 2 && strcmp(args[0], "public-decode") == 0) {
         char piped[8192] = {0};
         const char *text = resolve_input(args[1], piped, sizeof(piped));
@@ -941,6 +1001,8 @@ static int wallet_command(int count, char **args)
     eclipse_wallet_domain_t *domain = NULL;
     eclipse_wallet_t *wallet = NULL;
     eclipse_error_t status;
+    /* Domain-only commands have no recovery root; every other command below
+     * starts from the root and may derive either role. */
     if (public_from_domain)
         status = eclipse_wallet_domain_import_base92(secret, strlen(secret), &domain);
     else
@@ -949,6 +1011,8 @@ static int wallet_command(int count, char **args)
     int result = CLI_ERROR;
     if (status != ECLIPSE_SUCCESS) goto done;
     if (derive) {
+        /* Export exactly one role secret. The Base92 text is intentionally
+         * printed only because the developer requested this command. */
         status = eclipse_wallet_derive_domain(root, role, &domain);
         if (status != ECLIPSE_SUCCESS) goto done;
         size_t capacity = eclipse_wallet_domain_export_capacity();
@@ -993,6 +1057,8 @@ static int wallet_command(int count, char **args)
         if (status == ECLIPSE_SUCCESS) result = print_wallet_public(&key);
     }
 done:
+    /* All secret object owners are released on every branch. The command
+     * string itself is argv-owned, so only the local piped copy is wiped. */
     eclipse_wallet_free(wallet);
     eclipse_wallet_domain_free(domain);
     eclipse_wallet_recovery_free(root);
@@ -1002,6 +1068,7 @@ done:
     return result;
 }
 
+/* Small ncurses launcher for the available forms and the raw Eclipse shell. */
 static int tui_menu(void)
 {
     if (!tui_begin()) return CLI_USAGE;
@@ -1035,6 +1102,8 @@ static int tui_menu(void)
     }
 }
 
+/* Route a parsed command to an implemented API. Parenthesized calls remain
+ * convenience syntax for the existing block-header operations only. */
 static int run_command(int count, char **args)
 {
     if (count == 0) return tui_menu();
@@ -1118,6 +1187,9 @@ static int run_command(int count, char **args)
     return CLI_USAGE;
 }
 
+/* Detect shell guidance, configure logging, then run one command. A standalone
+ * `//` argv element or one quoted expression with ` // ` selects pipeline
+ * mode after the outer shell has already parsed its own syntax. */
 int main(int argc, char **argv)
 {
     host_shell = eclipse_host_shell_detect();

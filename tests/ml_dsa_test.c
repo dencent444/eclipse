@@ -1,3 +1,5 @@
+/* Exercise each ML-DSA wrapper through key generation, import/export,
+ * signature checks, and malformed-input paths. */
 #include "crypto/ml_dsa.h"
 
 #include <openssl/crypto.h>

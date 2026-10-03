@@ -10,6 +10,8 @@ struct eclipse_wallet_keypair {
     size_t public_key_size;
 };
 
+/* Take ownership of a generated private handle and cache its public bytes.
+ * If any allocation/export fails, release both parts before returning. */
 static eclipse_error_t wrap_private_key(eclipse_ml_dsa_scheme_t scheme,
                                         eclipse_ml_dsa_key_t *private_key,
                                         eclipse_wallet_keypair_t **out)
@@ -45,6 +47,7 @@ static eclipse_error_t wrap_private_key(eclipse_ml_dsa_scheme_t scheme,
     return ECLIPSE_SUCCESS;
 }
 
+/* Standalone random keypair experiment; this does not use the recovery root. */
 eclipse_error_t eclipse_wallet_generate_keypair(eclipse_ml_dsa_scheme_t scheme,
                                                  eclipse_wallet_keypair_t **out)
 {
@@ -64,6 +67,8 @@ eclipse_error_t eclipse_wallet_generate_keypair(eclipse_ml_dsa_scheme_t scheme,
     return status;
 }
 
+/* Rebuild a deterministic keypair from a role-scoped 32-byte seed. The caller
+ * still owns and must wipe its seed after the OpenSSL call finishes. */
 eclipse_error_t eclipse_wallet_keypair_from_seed(eclipse_ml_dsa_scheme_t scheme,
                                                  const uint8_t *seed,
                                                  size_t seed_length,
@@ -84,6 +89,8 @@ eclipse_error_t eclipse_wallet_keypair_from_seed(eclipse_ml_dsa_scheme_t scheme,
     return status;
 }
 
+/* Internal signing access for master-child certificates. Public wallet APIs
+ * do not expose a transaction-signing operation at this stage. */
 eclipse_error_t eclipse_wallet_keypair_sign(const eclipse_wallet_keypair_t *pair,
                                             const uint8_t *message, size_t length,
                                             const uint8_t *context, size_t context_length,
@@ -95,6 +102,8 @@ eclipse_error_t eclipse_wallet_keypair_sign(const eclipse_wallet_keypair_t *pair
                                 context_length, signature, capacity, written);
 }
 
+/* Return a borrowed view of cached public bytes. It becomes invalid when the
+ * keypair is freed; no private key is exposed through this function. */
 eclipse_error_t eclipse_wallet_keypair_public(const eclipse_wallet_keypair_t *pair,
                                                eclipse_ml_dsa_scheme_t *scheme,
                                                const uint8_t **bytes,
@@ -111,6 +120,7 @@ eclipse_error_t eclipse_wallet_keypair_public(const eclipse_wallet_keypair_t *pa
     return ECLIPSE_SUCCESS;
 }
 
+/* Release both the opaque private provider key and cached public copy. */
 void eclipse_wallet_keypair_free(eclipse_wallet_keypair_t *pair)
 {
     if (pair == NULL) return;
