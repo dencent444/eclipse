@@ -22,7 +22,7 @@ add_library(eclipse_core STATIC
 target_include_directories(eclipse_core PUBLIC src/core)
 target_link_libraries(eclipse_core PUBLIC OpenSSL::Crypto Threads::Threads)
 
-add_executable(eclipse-cli src/cli/main.c src/cli/pipeline.c)
+add_executable(eclipse-cli src/cli/main.c src/cli/pipeline.c src/cli/host_shell.c)
 target_include_directories(eclipse-cli PRIVATE ${CURSES_INCLUDE_DIRS})
 target_link_libraries(eclipse-cli PRIVATE eclipse_core ${CURSES_LIBRARIES})
 

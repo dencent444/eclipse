@@ -11,6 +11,7 @@
 #include "wallet/wallet.h"
 #include "wallet/keypair.h"
 #include "pipeline.h"
+#include "host_shell.h"
 
 #include <openssl/crypto.h>
 
@@ -26,6 +27,7 @@
 
 enum { CLI_OK = 0, CLI_ERROR = 1, CLI_USAGE = 2 };
 static eclipse_cli_pipeline_options_t pipeline_options;
+static eclipse_host_shell_t host_shell;
 
 static void usage(FILE *stream)
 {
@@ -55,7 +57,10 @@ static void usage(FILE *stream)
           "  wallet public-decode PUBLIC_BASE92\n"
           "  wallet verify ROOT_BASE92 receive|spend INDEX\n"
           "  shell                             Line-oriented developer shell\n"
+          "  shell-info                        Show detected shell and input guidance\n"
           "  pipe 'COMMAND // COMMAND // !FILTER ARGS'\n"
+          "  pipe                             Prompt for one raw pipeline line\n"
+          "  pipe -                           Read one raw pipeline line from stdin\n"
           "\n"
           "Integers are decimal or 0x-prefixed hex, except math mod (decimal).\n"
           "Hashes are exactly 32 bytes (64 hex digits), without a 0x prefix.\n"
@@ -66,6 +71,7 @@ static void usage(FILE *stream)
           "Wallet create/domain output unencrypted secrets; protect stdout.\n"
           "Quote the parenthesized form in a shell. Logs go to stderr by default.\n",
           stream);
+    eclipse_host_shell_print_guide(stream, host_shell);
 }
 
 static char *trim(char *text)
@@ -1006,18 +1012,20 @@ static int tui_menu(void)
             continue;
         }
         erase();
-        mvprintw(1, 2, "Eclipse developer CLI");
+        mvprintw(1, 2, "Eclipse developer CLI (%s)", host_shell.name);
         mvprintw(3, 2, "1  Serialize a block header");
         mvprintw(4, 2, "2  Deserialize a block header");
-        mvprintw(6, 2, "s  Developer shell    h  Show all commands    q  Quit");
+        mvprintw(6, 2, "s  Shell    i  Shell info    h  Help    q  Quit");
         refresh();
         int choice = getch();
-        if (choice == '1' || choice == '2' || choice == 's' || choice == 'h' ||
+        if (choice == '1' || choice == '2' || choice == 's' ||
+            choice == 'i' || choice == 'h' ||
             choice == 'q' || choice == 27) {
             endwin();
             if (choice == '1') return serialize_command(0, NULL);
             if (choice == '2') return deserialize_command(0, NULL);
             if (choice == 's') return eclipse_cli_shell(&pipeline_options);
+            if (choice == 'i') eclipse_host_shell_print_guide(stdout, host_shell);
             if (choice == 'h') usage(stdout);
             return CLI_OK;
         }
@@ -1059,8 +1067,17 @@ static int run_command(int count, char **args)
         return wallet_command(count - 1, args + 1);
     if (strcmp(command, "shell") == 0 && count == 1)
         return eclipse_cli_shell(&pipeline_options);
-    if (strcmp(command, "pipe") == 0 && count == 2)
-        return eclipse_cli_run_pipeline(args[1], &pipeline_options);
+    if (strcmp(command, "shell-info") == 0 && count == 1) {
+        eclipse_host_shell_print_guide(stdout, host_shell);
+        return CLI_OK;
+    }
+    if (strcmp(command, "pipe") == 0) {
+        if (count == 1 || (count == 2 && strcmp(args[1], "-") == 0))
+            return eclipse_cli_pipeline_from_stdin(&pipeline_options);
+        if (count == 2)
+            return eclipse_cli_run_pipeline(args[1], &pipeline_options);
+        return CLI_USAGE;
+    }
 
     char storage[1024];
     char *parts[6];
@@ -1094,8 +1111,10 @@ static int run_command(int count, char **args)
 
 int main(int argc, char **argv)
 {
+    host_shell = eclipse_host_shell_detect();
     int index = 1;
     pipeline_options.program = argv[0];
+    pipeline_options.host_shell_name = host_shell.name;
     while (index < argc) {
         if (strcmp(argv[index], "--log-level") == 0) {
             uint64_t level;
@@ -1117,6 +1136,8 @@ int main(int argc, char **argv)
         ++index;
     }
     pipeline_options.log_level = eclipse_log_get_info_level();
+    ECLIPSE_LOG_INFO(2, "CLI outer shell detected: %s (%s)",
+                     host_shell.name, host_shell.source);
     ECLIPSE_LOG_INFO(1, "CLI command started");
     int result;
     bool direct_pipeline = false;

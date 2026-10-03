@@ -42,6 +42,7 @@ HEX=$(./build/eclipse-cli --log-level 0 serialize 1 2 3 4 "$HASH" "$HASH")
 ./build/eclipse-cli particle commit 10 "$HASH" "$HASH" "$HASH"
 ./build/eclipse-cli 'serialize(1,2,3,4,0000000000000000000000000000000000000000000000000000000000000000,0000000000000000000000000000000000000000000000000000000000000000) // deserialize // !grep version'
 ./build/eclipse-cli shell
+./build/eclipse-cli shell-info
 ```
 
 The header has six fields in the order `version`, `timestamp`, `difficulty`,
@@ -73,6 +74,17 @@ by default, so they do not enter the data pipe. Logs omit keys, wallet roots,
 particle openings, and serialized values. Shell history and process arguments
 can still expose secrets supplied on the command line; keep secret commands
 in a private development environment.
+
+At every launch, the CLI identifies the invoking shell from the Linux parent
+process when possible and otherwise uses `SHELL` as a hint. `shell-info` and
+`help` show guidance for bash, zsh, fish, PowerShell, and POSIX shells; the
+ncurses menu displays the detected profile. Unknown shells get a safe generic
+path. The compiled binary is the same for every shell. The outer shell parses
+its command line before the CLI starts, so quoting cannot be repaired after
+the fact. Enter raw `()`, `!`, and `//` inside `eclipse-cli shell`, or use
+`eclipse-cli pipe -` to read one expression from stdin. For example, a file
+containing `math mod -1 // !cat` can be run with
+`./build/eclipse-cli pipe - < commands.txt`.
 
 The provisional particle fields and exact commitment bytes are in
 [`protocol.md`](protocol.md). A particle opening is private, while its derived

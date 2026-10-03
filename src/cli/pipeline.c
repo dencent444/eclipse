@@ -226,6 +226,30 @@ int eclipse_cli_run_pipeline(const char *line,
     return result;
 }
 
+int eclipse_cli_pipeline_from_stdin(const eclipse_cli_pipeline_options_t *options)
+{
+    if (options == NULL) return 2;
+    char line[MAX_LINE] = {0};
+    if (isatty(STDIN_FILENO)) {
+        fputs("eclipse pipe> ", stdout);
+        fflush(stdout);
+    }
+    if (fgets(line, sizeof(line), stdin) == NULL) {
+        ECLIPSE_LOG_WARNING("pipeline expression is missing from stdin");
+        OPENSSL_cleanse(line, sizeof(line));
+        return 2;
+    }
+    size_t length = strlen(line);
+    if (length > 0 && line[length - 1] != '\n' && !feof(stdin)) {
+        ECLIPSE_LOG_WARNING("pipeline expression from stdin is too long");
+        OPENSSL_cleanse(line, sizeof(line));
+        return 2;
+    }
+    int result = eclipse_cli_run_pipeline(trim(line), options);
+    OPENSSL_cleanse(line, sizeof(line));
+    return result;
+}
+
 int eclipse_cli_shell(const eclipse_cli_pipeline_options_t *options)
 {
     if (options == NULL) return 2;
@@ -233,6 +257,9 @@ int eclipse_cli_shell(const eclipse_cli_pipeline_options_t *options)
     bool interactive = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
     int last_status = 0;
     ECLIPSE_LOG_INFO(1, "developer pipeline shell started");
+    if (interactive)
+        fprintf(stderr, "Eclipse shell (outer shell: %s). Type raw commands; exit to leave.\n",
+                options->host_shell_name == NULL ? "unknown" : options->host_shell_name);
     for (;;) {
         if (interactive) { fputs("eclipse> ", stdout); fflush(stdout); }
         if (fgets(line, sizeof(line), stdin) == NULL) break;

@@ -208,3 +208,33 @@ execute_process(
 if(NOT RESULT EQUAL 2)
     message(FATAL_ERROR "malformed pipeline was accepted: ${RESULT}\n${OUTPUT}\n${ERROR}")
 endif()
+
+# A raw line read by Eclipse is unaffected by the syntax rules of the shell
+# that launched the already-compiled binary.
+set(RAW_PIPE_INPUT "${TEST_BINARY_DIR}/cli-raw-pipe.txt")
+file(WRITE "${RAW_PIPE_INPUT}" "math mod -1 // !cat\n")
+execute_process(
+    COMMAND "${CLI}" pipe - INPUT_FILE "${RAW_PIPE_INPUT}"
+    RESULT_VARIABLE RESULT OUTPUT_VARIABLE OUTPUT ERROR_VARIABLE ERROR
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT RESULT EQUAL 0 OR NOT OUTPUT STREQUAL "8380416")
+    message(FATAL_ERROR "stdin pipeline failed: ${RESULT}\n${OUTPUT}\n${ERROR}")
+endif()
+
+# The parent here is CMake, so detection uses the SHELL hint. Check that the
+# resulting guidance follows the runtime profile without another build.
+foreach(PROFILE IN ITEMS bash zsh fish pwsh sh)
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env "SHELL=/bin/${PROFILE}" "${CLI}" shell-info
+        RESULT_VARIABLE RESULT OUTPUT_VARIABLE OUTPUT ERROR_VARIABLE ERROR)
+    if(PROFILE STREQUAL "pwsh")
+        set(EXPECTED_PROFILE "PowerShell")
+    elseif(PROFILE STREQUAL "sh")
+        set(EXPECTED_PROFILE "POSIX shell")
+    else()
+        set(EXPECTED_PROFILE "${PROFILE}")
+    endif()
+    if(NOT RESULT EQUAL 0 OR NOT OUTPUT MATCHES "Detected outer shell: ${EXPECTED_PROFILE}")
+        message(FATAL_ERROR "shell profile ${PROFILE} failed: ${RESULT}\n${OUTPUT}\n${ERROR}")
+    endif()
+endforeach()
