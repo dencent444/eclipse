@@ -33,6 +33,12 @@ bool eclipse_ml_dsa_info(eclipse_ml_dsa_scheme_t scheme,
 /* The caller owns *out and releases it with eclipse_ml_dsa_key_free(). */
 eclipse_error_t eclipse_ml_dsa_generate(eclipse_ml_dsa_scheme_t scheme,
                                         eclipse_ml_dsa_key_t **out);
+/* Deterministically generates one pair from exactly 32 secret bytes. The
+ * caller retains and must cleanse the seed; it is not a wallet recovery root. */
+eclipse_error_t eclipse_ml_dsa_generate_from_seed(eclipse_ml_dsa_scheme_t scheme,
+                                                  const uint8_t *seed,
+                                                  size_t seed_length,
+                                                  eclipse_ml_dsa_key_t **out);
 eclipse_error_t eclipse_ml_dsa_import_public(eclipse_ml_dsa_scheme_t scheme,
                                              const uint8_t *bytes, size_t length,
                                              eclipse_ml_dsa_key_t **out);

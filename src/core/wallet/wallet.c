@@ -1,17 +1,15 @@
 #include "wallet.h"
 #include "keypair_internal.h"
+#include "recovery_internal.h"
 #include "../encoding/base92.h"
 #include "../log.h"
 
 #include <openssl/crypto.h>
-#include <openssl/evp.h>
 
 #include <stdlib.h>
 #include <string.h>
 
 #define PUBLIC_PACKET_HEADER_SIZE 8u
-#define MASTER_PACKET_HEADER_SIZE 9u
-#define MASTER_PACKET_DIGEST_SIZE 32u
 #define CHILD_BINDING_HEADER_SIZE 8u
 
 static const uint8_t binding_context[] = "ECLIPSE/WALLET/CHILD/V1";
@@ -25,6 +23,8 @@ typedef struct {
 
 struct eclipse_wallet {
     eclipse_ml_dsa_scheme_t scheme;
+    bool has_receive;
+    bool has_spend;
     wallet_pool_t receive;
     wallet_pool_t spend;
 };
@@ -52,8 +52,10 @@ static eclipse_ml_dsa_scheme_t scheme_from_wire(uint8_t wire)
 static const wallet_pool_t *role_pool(const eclipse_wallet_t *wallet,
                                       eclipse_wallet_role_t role)
 {
-    if (role == ECLIPSE_WALLET_RECEIVE) return &wallet->receive;
-    if (role == ECLIPSE_WALLET_SPEND) return &wallet->spend;
+    if (role == ECLIPSE_WALLET_RECEIVE && wallet->has_receive)
+        return &wallet->receive;
+    if (role == ECLIPSE_WALLET_SPEND && wallet->has_spend)
+        return &wallet->spend;
     return NULL;
 }
 
@@ -108,17 +110,27 @@ static eclipse_error_t binding_message(const eclipse_wallet_public_key_t *child,
     return ECLIPSE_SUCCESS;
 }
 
-static eclipse_error_t pool_generate(wallet_pool_t *pool,
-                                     eclipse_ml_dsa_scheme_t scheme,
-                                     eclipse_wallet_role_t role)
+static eclipse_error_t pool_derive(wallet_pool_t *pool,
+                                   const eclipse_wallet_domain_t *domain)
 {
-    eclipse_error_t status = eclipse_wallet_generate_keypair(scheme, &pool->master);
+    const eclipse_ml_dsa_scheme_t scheme = domain->scheme;
+    const eclipse_wallet_role_t role = domain->role;
+    uint8_t seed[ECLIPSE_WALLET_SECRET_SIZE] = {0};
+    eclipse_error_t status = eclipse_wallet_derive_key_seed(domain, 0, 0, seed);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_wallet_keypair_from_seed(scheme, seed, sizeof(seed),
+                                                  &pool->master);
+    OPENSSL_cleanse(seed, sizeof(seed));
     if (status != ECLIPSE_SUCCESS) return status;
     eclipse_ml_dsa_info_t info;
     if (!eclipse_ml_dsa_info(scheme, &info)) return ECLIPSE_ERROR_INVALID_ARGUMENT;
 
     for (size_t i = 0; i < ECLIPSE_WALLET_POOL_SIZE; ++i) {
-        status = eclipse_wallet_generate_keypair(scheme, &pool->children[i]);
+        status = eclipse_wallet_derive_key_seed(domain, 1, (uint32_t)i, seed);
+        if (status == ECLIPSE_SUCCESS)
+            status = eclipse_wallet_keypair_from_seed(scheme, seed, sizeof(seed),
+                                                      &pool->children[i]);
+        OPENSSL_cleanse(seed, sizeof(seed));
         if (status != ECLIPSE_SUCCESS) return status;
         pool->signatures[i] = malloc(info.signature_size);
         if (pool->signatures[i] == NULL) return ECLIPSE_ERROR_OUT_OF_MEMORY;
@@ -137,44 +149,111 @@ static eclipse_error_t pool_generate(wallet_pool_t *pool,
                                              &pool->signature_lengths[i]);
         if (status != ECLIPSE_SUCCESS) return status;
     }
-    ECLIPSE_LOG_INFO(2, "%s pool generated with %u child keys",
+    ECLIPSE_LOG_INFO(2, "%s pool deterministically derived with %u child keys",
                      role == ECLIPSE_WALLET_RECEIVE ? "receive" : "spend",
                      ECLIPSE_WALLET_POOL_SIZE);
     return ECLIPSE_SUCCESS;
 }
 
 eclipse_error_t eclipse_wallet_create(eclipse_ml_dsa_scheme_t scheme,
-                                      eclipse_wallet_t **out)
+                                      eclipse_wallet_recovery_t **recovery_out,
+                                      eclipse_wallet_t **wallet_out)
 {
-    if (out == NULL) {
+    if (recovery_out == NULL || wallet_out == NULL) {
         ECLIPSE_LOG_WARNING("wallet creation output is null");
         return ECLIPSE_ERROR_NULL_POINTER;
     }
+    *recovery_out = NULL;
+    *wallet_out = NULL;
+    eclipse_wallet_recovery_t *recovery = NULL;
+    eclipse_error_t status = eclipse_wallet_recovery_generate(scheme, &recovery);
+    if (status != ECLIPSE_SUCCESS) return status;
+    status = eclipse_wallet_open(recovery, wallet_out);
+    if (status != ECLIPSE_SUCCESS) {
+        eclipse_wallet_recovery_free(recovery);
+        return status;
+    }
+    *recovery_out = recovery;
+    ECLIPSE_LOG_INFO(1, "recoverable wallet created; root kept separate");
+    return ECLIPSE_SUCCESS;
+}
+
+eclipse_error_t eclipse_wallet_open(const eclipse_wallet_recovery_t *recovery,
+                                    eclipse_wallet_t **out)
+{
+    if (out == NULL) return ECLIPSE_ERROR_NULL_POINTER;
     *out = NULL;
+    if (recovery == NULL) return ECLIPSE_ERROR_NULL_POINTER;
     eclipse_ml_dsa_info_t info;
-    if (!eclipse_ml_dsa_info(scheme, &info)) {
-        ECLIPSE_LOG_WARNING("wallet creation rejected an unknown ML-DSA scheme");
+    if (!eclipse_ml_dsa_info(recovery->scheme, &info)) {
+        ECLIPSE_LOG_WARNING("wallet open rejected an unknown ML-DSA scheme");
         return ECLIPSE_ERROR_INVALID_ARGUMENT;
+    }
+    eclipse_wallet_domain_t *receive = NULL;
+    eclipse_wallet_domain_t *spend = NULL;
+    eclipse_error_t status = eclipse_wallet_derive_domain(
+        recovery, ECLIPSE_WALLET_RECEIVE, &receive);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_wallet_derive_domain(recovery, ECLIPSE_WALLET_SPEND, &spend);
+    if (status != ECLIPSE_SUCCESS) {
+        eclipse_wallet_domain_free(receive);
+        eclipse_wallet_domain_free(spend);
+        return status;
     }
     eclipse_wallet_t *wallet = calloc(1, sizeof(*wallet));
     if (wallet == NULL) {
+        eclipse_wallet_domain_free(receive);
+        eclipse_wallet_domain_free(spend);
         ECLIPSE_LOG_ERROR("wallet handle allocation failed");
         return ECLIPSE_ERROR_OUT_OF_MEMORY;
     }
-    wallet->scheme = scheme;
+    wallet->scheme = recovery->scheme;
 
-    ECLIPSE_LOG_INFO(1, "wallet key-pool generation started");
-    eclipse_error_t status = pool_generate(&wallet->receive, scheme,
-                                            ECLIPSE_WALLET_RECEIVE);
-    if (status == ECLIPSE_SUCCESS)
-        status = pool_generate(&wallet->spend, scheme, ECLIPSE_WALLET_SPEND);
+    ECLIPSE_LOG_INFO(1, "wallet key-pool derivation started");
+    status = pool_derive(&wallet->receive, receive);
+    if (status == ECLIPSE_SUCCESS) {
+        wallet->has_receive = true;
+        status = pool_derive(&wallet->spend, spend);
+    }
+    if (status == ECLIPSE_SUCCESS) wallet->has_spend = true;
+    eclipse_wallet_domain_free(receive);
+    eclipse_wallet_domain_free(spend);
     if (status != ECLIPSE_SUCCESS) {
         eclipse_wallet_free(wallet); /* Also handles a partially built pool. */
-        ECLIPSE_LOG_ERROR("wallet key-pool generation failed with code %d", status);
+        ECLIPSE_LOG_ERROR("wallet key-pool derivation failed with code %d", status);
         return status;
     }
     *out = wallet;
-    ECLIPSE_LOG_INFO(1, "wallet key-pool generation completed");
+    ECLIPSE_LOG_INFO(1, "wallet key-pool derivation completed");
+    return ECLIPSE_SUCCESS;
+}
+
+eclipse_error_t eclipse_wallet_open_domain(const eclipse_wallet_domain_t *domain,
+                                           eclipse_wallet_t **out)
+{
+    if (out == NULL) return ECLIPSE_ERROR_NULL_POINTER;
+    *out = NULL;
+    if (domain == NULL) return ECLIPSE_ERROR_NULL_POINTER;
+    eclipse_ml_dsa_info_t info;
+    if (!eclipse_ml_dsa_info(domain->scheme, &info) ||
+        (domain->role != ECLIPSE_WALLET_RECEIVE &&
+         domain->role != ECLIPSE_WALLET_SPEND))
+        return ECLIPSE_ERROR_INVALID_ARGUMENT;
+    eclipse_wallet_t *wallet = calloc(1, sizeof(*wallet));
+    if (wallet == NULL) return ECLIPSE_ERROR_OUT_OF_MEMORY;
+    wallet->scheme = domain->scheme;
+    wallet_pool_t *pool = domain->role == ECLIPSE_WALLET_RECEIVE ?
+                          &wallet->receive : &wallet->spend;
+    eclipse_error_t status = pool_derive(pool, domain);
+    if (status != ECLIPSE_SUCCESS) {
+        eclipse_wallet_free(wallet);
+        return status;
+    }
+    if (domain->role == ECLIPSE_WALLET_RECEIVE) wallet->has_receive = true;
+    else wallet->has_spend = true;
+    *out = wallet;
+    ECLIPSE_LOG_INFO(2, "%s-only wallet opened without the other domain",
+                     domain->role == ECLIPSE_WALLET_RECEIVE ? "receive" : "spend");
     return ECLIPSE_SUCCESS;
 }
 
@@ -317,83 +396,6 @@ eclipse_error_t eclipse_wallet_verify_public_binding(
     ECLIPSE_LOG_INFO(4, "public wallet binding %s",
                      status == ECLIPSE_SUCCESS && *valid ? "accepted" : "rejected");
     return status;
-}
-
-size_t eclipse_wallet_master_export_capacity(eclipse_ml_dsa_scheme_t scheme)
-{
-    eclipse_ml_dsa_info_t info;
-    if (!eclipse_ml_dsa_info(scheme, &info)) return 0;
-    size_t raw_length = MASTER_PACKET_HEADER_SIZE + info.private_key_size +
-                        MASTER_PACKET_DIGEST_SIZE;
-    return eclipse_base92_encoded_capacity(raw_length);
-}
-
-eclipse_error_t eclipse_wallet_export_master_base92(const eclipse_wallet_t *wallet,
-                                                     eclipse_wallet_role_t role,
-                                                     char *output, size_t capacity,
-                                                     size_t *written)
-{
-    if (written == NULL) {
-        ECLIPSE_LOG_WARNING("master export length output is null");
-        return ECLIPSE_ERROR_NULL_POINTER;
-    }
-    *written = 0;
-    if (wallet == NULL || output == NULL) {
-        ECLIPSE_LOG_WARNING("master export rejected a null argument");
-        return ECLIPSE_ERROR_NULL_POINTER;
-    }
-    const wallet_pool_t *pool = role_pool(wallet, role);
-    if (pool == NULL) {
-        ECLIPSE_LOG_WARNING("master export rejected an invalid role");
-        return ECLIPSE_ERROR_INVALID_ARGUMENT;
-    }
-    eclipse_ml_dsa_info_t info;
-    if (!eclipse_ml_dsa_info(wallet->scheme, &info)) return ECLIPSE_ERROR_INVALID_ARGUMENT;
-    size_t raw_length = MASTER_PACKET_HEADER_SIZE + info.private_key_size +
-                        MASTER_PACKET_DIGEST_SIZE;
-    if (capacity < eclipse_base92_encoded_capacity(raw_length)) {
-        ECLIPSE_LOG_WARNING("master export buffer is too small");
-        return ECLIPSE_ERROR_BUFFER_TOO_SMALL;
-    }
-
-    uint8_t *raw = OPENSSL_malloc(raw_length);
-    if (raw == NULL) {
-        ECLIPSE_LOG_ERROR("master export temporary allocation failed");
-        return ECLIPSE_ERROR_OUT_OF_MEMORY;
-    }
-    memcpy(raw, "EWMS", 4);
-    raw[4] = 1; /* Export format version, not a consensus version. */
-    raw[5] = (uint8_t)role;
-    raw[6] = wire_scheme(wallet->scheme);
-    raw[7] = (uint8_t)(info.private_key_size >> 8);
-    raw[8] = (uint8_t)info.private_key_size;
-    eclipse_error_t status = eclipse_wallet_keypair_export_private(
-        pool->master, raw + MASTER_PACKET_HEADER_SIZE, info.private_key_size);
-    if (status == ECLIPSE_SUCCESS) {
-        size_t digest_length = 0;
-        if (EVP_Q_digest(NULL, "SHA2-256", NULL, raw,
-                         raw_length - MASTER_PACKET_DIGEST_SIZE,
-                         raw + raw_length - MASTER_PACKET_DIGEST_SIZE,
-                         &digest_length) != 1 ||
-            digest_length != MASTER_PACKET_DIGEST_SIZE)
-            status = ECLIPSE_ERROR_CRYPTO_FAILURE;
-    }
-    if (status == ECLIPSE_SUCCESS) {
-        status = eclipse_base92_encode(raw, raw_length, output, capacity, written);
-        /* A failed text encoding must not leave a partial private export in
-           the caller's buffer. The checked capacity covers these bytes. */
-        if (status != ECLIPSE_SUCCESS)
-            OPENSSL_cleanse(output, eclipse_base92_encoded_capacity(raw_length));
-    }
-    OPENSSL_clear_free(raw, raw_length);
-    if (status != ECLIPSE_SUCCESS) {
-        if (capacity > 0) output[0] = '\0';
-        ECLIPSE_LOG_ERROR("master private export failed with code %d", status);
-        return status;
-    }
-    ECLIPSE_LOG_INFO(1, "%s master private key exported as unencrypted Base92",
-                     role == ECLIPSE_WALLET_RECEIVE ? "receive" : "spend");
-    return ECLIPSE_SUCCESS;
 }
 
 size_t eclipse_wallet_public_serialized_size(eclipse_ml_dsa_scheme_t scheme)

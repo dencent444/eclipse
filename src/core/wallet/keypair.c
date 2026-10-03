@@ -64,11 +64,24 @@ eclipse_error_t eclipse_wallet_generate_keypair(eclipse_ml_dsa_scheme_t scheme,
     return status;
 }
 
-eclipse_error_t eclipse_wallet_keypair_export_private(
-    const eclipse_wallet_keypair_t *pair, uint8_t *bytes, size_t capacity)
+eclipse_error_t eclipse_wallet_keypair_from_seed(eclipse_ml_dsa_scheme_t scheme,
+                                                 const uint8_t *seed,
+                                                 size_t seed_length,
+                                                 eclipse_wallet_keypair_t **out)
 {
-    if (pair == NULL) return ECLIPSE_ERROR_NULL_POINTER;
-    return eclipse_ml_dsa_export_private(pair->private_key, bytes, capacity);
+    if (out == NULL || seed == NULL) {
+        ECLIPSE_LOG_WARNING("wallet seeded key-pair output or seed is null");
+        return ECLIPSE_ERROR_NULL_POINTER;
+    }
+    *out = NULL;
+    eclipse_ml_dsa_key_t *private_key = NULL;
+    eclipse_error_t status = eclipse_ml_dsa_generate_from_seed(
+        scheme, seed, seed_length, &private_key);
+    if (status != ECLIPSE_SUCCESS) return status;
+    status = wrap_private_key(scheme, private_key, out);
+    if (status == ECLIPSE_SUCCESS)
+        ECLIPSE_LOG_INFO(4, "wallet key pair derived from a scoped seed");
+    return status;
 }
 
 eclipse_error_t eclipse_wallet_keypair_sign(const eclipse_wallet_keypair_t *pair,

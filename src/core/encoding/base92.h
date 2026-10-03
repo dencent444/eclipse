@@ -15,7 +15,7 @@ extern "C" {
 size_t eclipse_base92_encoded_capacity(size_t input_length);
 
 /* *written excludes the terminating NUL. On error it is zero. No secret data
- * belongs in logs: this codec may later handle wallet backup material. */
+ * belongs in logs: this codec also handles explicit wallet secret exports. */
 eclipse_error_t eclipse_base92_encode(const uint8_t *input, size_t input_length,
                                       char *output, size_t capacity,
                                       size_t *written);

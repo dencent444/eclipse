@@ -84,6 +84,50 @@ eclipse_error_t eclipse_ml_dsa_generate(eclipse_ml_dsa_scheme_t scheme,
     return status;
 }
 
+eclipse_error_t eclipse_ml_dsa_generate_from_seed(eclipse_ml_dsa_scheme_t scheme,
+                                                  const uint8_t *seed,
+                                                  size_t seed_length,
+                                                  eclipse_ml_dsa_key_t **out)
+{
+    if (out == NULL || seed == NULL) {
+        ECLIPSE_LOG_WARNING("seeded ML-DSA generation rejected a null argument");
+        return ECLIPSE_ERROR_NULL_POINTER;
+    }
+    *out = NULL;
+    const char *name = algorithm_name(scheme);
+    if (name == NULL || seed_length != 32) {
+        ECLIPSE_LOG_WARNING("seeded ML-DSA generation rejected scheme or seed length");
+        return ECLIPSE_ERROR_INVALID_ARGUMENT;
+    }
+
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_from_name(NULL, name, NULL);
+    if (ctx == NULL) {
+        ECLIPSE_LOG_ERROR("seeded ML-DSA generation setup failed");
+        return ECLIPSE_ERROR_CRYPTO_FAILURE;
+    }
+    /* OpenSSL reads the seed while generating; it is never logged or copied
+       into a wallet recovery packet by this wrapper. */
+    OSSL_PARAM params[] = {
+        OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_ML_DSA_SEED,
+                                          (void *)seed, seed_length),
+        OSSL_PARAM_construct_end()
+    };
+    EVP_PKEY *pkey = NULL;
+    int ok = EVP_PKEY_keygen_init(ctx) > 0 &&
+             EVP_PKEY_CTX_set_params(ctx, params) > 0 &&
+             EVP_PKEY_keygen(ctx, &pkey) > 0;
+    EVP_PKEY_CTX_free(ctx);
+    if (!ok) {
+        EVP_PKEY_free(pkey);
+        ECLIPSE_LOG_ERROR("seeded ML-DSA generation failed for %s", name);
+        return ECLIPSE_ERROR_CRYPTO_FAILURE;
+    }
+    eclipse_error_t status = wrap_key(scheme, pkey, true, out);
+    if (status == ECLIPSE_SUCCESS)
+        ECLIPSE_LOG_INFO(4, "ML-DSA key pair derived for %s", name);
+    return status;
+}
+
 eclipse_error_t eclipse_ml_dsa_import_public(eclipse_ml_dsa_scheme_t scheme,
                                              const uint8_t *bytes, size_t length,
                                              eclipse_ml_dsa_key_t **out)

@@ -50,6 +50,32 @@ static void exercise_scheme(eclipse_ml_dsa_scheme_t scheme)
                                         info.private_key_size) ==
           ECLIPSE_ERROR_INVALID_ARGUMENT);
 
+    /* The provider's 32-byte seed API must recreate the same key pair.
+       This is the primitive used by wallet recovery after HKDF derivation. */
+    uint8_t seed[32];
+    for (size_t i = 0; i < sizeof(seed); ++i) seed[i] = (uint8_t)(i + scheme);
+    eclipse_ml_dsa_key_t *seeded_a = NULL, *seeded_b = NULL;
+    CHECK(eclipse_ml_dsa_generate_from_seed(scheme, seed, sizeof(seed) - 1,
+                                            &seeded_a) == ECLIPSE_ERROR_INVALID_ARGUMENT);
+    CHECK(seeded_a == NULL);
+    CHECK(eclipse_ml_dsa_generate_from_seed(scheme, seed, sizeof(seed),
+                                            &seeded_a) == ECLIPSE_SUCCESS);
+    CHECK(eclipse_ml_dsa_generate_from_seed(scheme, seed, sizeof(seed),
+                                            &seeded_b) == ECLIPSE_SUCCESS);
+    uint8_t *seeded_public = malloc(info.public_key_size);
+    CHECK(seeded_public != NULL);
+    CHECK(eclipse_ml_dsa_export_public(seeded_a, public_bytes,
+                                       info.public_key_size) == ECLIPSE_SUCCESS);
+    CHECK(eclipse_ml_dsa_export_public(seeded_b, seeded_public,
+                                       info.public_key_size) == ECLIPSE_SUCCESS);
+    CHECK(memcmp(public_bytes, seeded_public, info.public_key_size) == 0);
+    CHECK(eclipse_ml_dsa_export_public(private_key, public_bytes,
+                                       info.public_key_size) == ECLIPSE_SUCCESS);
+    OPENSSL_cleanse(seed, sizeof(seed));
+    free(seeded_public);
+    eclipse_ml_dsa_key_free(seeded_a);
+    eclipse_ml_dsa_key_free(seeded_b);
+
     size_t written = 99;
     CHECK(eclipse_ml_dsa_sign(private_key, message, sizeof(message),
                               context, sizeof(context) - 1, signature,

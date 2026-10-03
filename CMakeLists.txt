@@ -14,6 +14,7 @@ add_library(eclipse_core STATIC
     src/core/crypto/ml_dsa_math.c
     src/core/encoding/base92.c
     src/core/wallet/keypair.c
+    src/core/wallet/recovery.c
     src/core/wallet/wallet.c
     src/core/log.c
 )

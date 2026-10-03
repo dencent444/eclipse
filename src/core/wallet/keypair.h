@@ -10,8 +10,8 @@
 extern "C" {
 #endif
 
-/* One independently generated ML-DSA key pair. The private key is opaque and
- * stays inside this object; the public bytes are borrowed until free(). */
+/* One ML-DSA key pair. The private key is opaque and stays inside this
+ * object; the public bytes are borrowed until free(). */
 typedef struct eclipse_wallet_keypair eclipse_wallet_keypair_t;
 
 eclipse_error_t eclipse_wallet_generate_keypair(eclipse_ml_dsa_scheme_t scheme,

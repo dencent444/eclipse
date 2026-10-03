@@ -20,6 +20,8 @@ typedef enum {
 } eclipse_wallet_role_t;
 
 typedef struct eclipse_wallet eclipse_wallet_t;
+typedef struct eclipse_wallet_recovery eclipse_wallet_recovery_t;
+typedef struct eclipse_wallet_domain eclipse_wallet_domain_t;
 
 /* A standalone public key. No role, pool index, master key, or certificate is
  * carried in the network representation, to avoid an unnecessary link. */
@@ -29,12 +31,44 @@ typedef struct {
     uint8_t bytes[ECLIPSE_WALLET_PUBLIC_MAX_SIZE];
 } eclipse_wallet_public_key_t;
 
-/* Creates two independent master ML-DSA pairs and 24 independently random
- * child pairs per role. Each master signs its own child keys with role/index
- * domain separation. There is no wallet seed or deterministic derivation. */
+/* Generates one random recovery root and opens both derived key domains.
+ * The root is returned separately and is NEVER stored in the wallet object.
+ * Free it promptly after an intentional manual export. No backup file is made. */
 eclipse_error_t eclipse_wallet_create(eclipse_ml_dsa_scheme_t scheme,
-                                      eclipse_wallet_t **out);
+                                      eclipse_wallet_recovery_t **recovery_out,
+                                      eclipse_wallet_t **wallet_out);
+/* Rebuilds both pools from the same root, or only one from a role secret. */
+eclipse_error_t eclipse_wallet_open(const eclipse_wallet_recovery_t *recovery,
+                                    eclipse_wallet_t **out);
+eclipse_error_t eclipse_wallet_open_domain(const eclipse_wallet_domain_t *domain,
+                                           eclipse_wallet_t **out);
 void eclipse_wallet_free(eclipse_wallet_t *wallet);
+
+/* A root restores both domains. A receive domain cannot derive spend keys.
+ * These types are opaque so callers cannot accidentally print raw secrets. */
+eclipse_error_t eclipse_wallet_recovery_generate(eclipse_ml_dsa_scheme_t scheme,
+                                                 eclipse_wallet_recovery_t **out);
+eclipse_error_t eclipse_wallet_derive_domain(const eclipse_wallet_recovery_t *recovery,
+                                             eclipse_wallet_role_t role,
+                                             eclipse_wallet_domain_t **out);
+void eclipse_wallet_recovery_free(eclipse_wallet_recovery_t *recovery);
+void eclipse_wallet_domain_free(eclipse_wallet_domain_t *domain);
+
+/* Explicit, unencrypted Base92 exports/imports. They never write a file.
+ * Root export restores both roles; domain export restores only its role.
+ * The caller must protect and cleanse exported text. Capacity includes NUL. */
+size_t eclipse_wallet_recovery_export_capacity(void);
+eclipse_error_t eclipse_wallet_recovery_export_base92(
+    const eclipse_wallet_recovery_t *recovery, char *output, size_t capacity,
+    size_t *written);
+eclipse_error_t eclipse_wallet_recovery_import_base92(
+    const char *text, size_t length, eclipse_wallet_recovery_t **out);
+size_t eclipse_wallet_domain_export_capacity(void);
+eclipse_error_t eclipse_wallet_domain_export_base92(
+    const eclipse_wallet_domain_t *domain, char *output, size_t capacity,
+    size_t *written);
+eclipse_error_t eclipse_wallet_domain_import_base92(
+    const char *text, size_t length, eclipse_wallet_domain_t **out);
 
 eclipse_error_t eclipse_wallet_master_public(const eclipse_wallet_t *wallet,
                                               eclipse_wallet_role_t role,
@@ -59,16 +93,6 @@ eclipse_error_t eclipse_wallet_verify_public_binding(
 eclipse_error_t eclipse_wallet_verify_child_binding(const eclipse_wallet_t *wallet,
                                                      eclipse_wallet_role_t role,
                                                      size_t index, bool *valid);
-
-/* Separate, unencrypted Base92 export of ONE expanded master private key.
- * This does not include child private keys and cannot restore the pool. The
- * returned text is secret; the caller must avoid logs and cleanse the buffer.
- * Capacity includes the terminating NUL; *written excludes it. */
-size_t eclipse_wallet_master_export_capacity(eclipse_ml_dsa_scheme_t scheme);
-eclipse_error_t eclipse_wallet_export_master_base92(const eclipse_wallet_t *wallet,
-                                                     eclipse_wallet_role_t role,
-                                                     char *output, size_t capacity,
-                                                     size_t *written);
 
 /* Versioned developer transport format for ONE public key; not a consensus
  * object. Both binary and Base92 forms contain exactly the same public data. */

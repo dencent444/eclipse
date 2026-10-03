@@ -52,7 +52,8 @@ signatures.
 ## ML-DSA module
 
 `src/core/crypto/ml_dsa.h` exposes ML-DSA-44, ML-DSA-65, and ML-DSA-87
-key generation, public-key import/export, message signing, and verification.
+random or seeded key generation, public-key import/export, private-key export,
+message signing, and verification.
 OpenSSL implements the FIPS 204 cryptography; this module only handles the
 application-facing API and input checks. Generated private keys currently live
 in memory only.
@@ -71,28 +72,49 @@ values, not committed consensus identifiers.
 
 ## Wallet key skeleton
 
-`src/core/wallet/keypair.h` contains a standalone `generate_keypair` wrapper.
-`src/core/wallet/wallet.h` builds one receive master and one spend master,
-plus 24 independently random child ML-DSA key pairs for each role. Each master
-signs its own child public keys with a context, role, scheme, and index; the
-wallet can verify these bindings. A separate public verifier rejects a wrong
-master, role, or index. Binding signatures are not part of the network key
-packet: publishing several under one master would reveal a link between keys.
-There is no wallet seed or deterministic child derivation. OpenSSL does use
-random input internally for each ML-DSA
-key-generation call, as described in its
+`src/core/wallet/keypair.h` retains a standalone random `generate_keypair`
+wrapper for experiments. The recoverable wallet in `src/core/wallet/wallet.h`
+uses one randomly generated 32-byte root. HKDF-SHA256 derives separate receive
+and spend domain secrets using fixed dev-wallet labels, scheme, and role. Each
+domain deterministically derives a certificate-master ML-DSA pair and 24 child
+pairs with separate labels and indices. OpenSSL accepts a 32-byte seed for
+deterministic ML-DSA key generation, as documented in its
 [ML-DSA documentation](https://docs.openssl.org/3.5/man7/EVP_PKEY-ML-DSA/).
+The derivation is HKDF extract-and-expand with salt
+`ECLIPSE/DEV/WALLET/V1/HKDF-SHA256`. Domain `info` is the literal label
+`ECLIPSE/DEV/WALLET/V1/DOMAIN`, one scheme byte, then one role byte. Key
+`info` is the literal label `ECLIPSE/DEV/WALLET/V1/KEY`,
+scheme byte, role byte, key-kind byte (master or child), and a four-byte
+big-endian index. Changing any of these bytes changes every affected key.
 
-The two *master private keys* can be exported separately as Base92 strings
-through `eclipse_wallet_export_master_base92`. They are unencrypted secrets.
-The Base92 codec follows the published
+`eclipse_wallet_create(scheme, &root, &wallet)` returns the root **separately**
+from the full wallet. `eclipse_wallet_open(root, &wallet)` rebuilds both pools;
+`eclipse_wallet_derive_domain(root, role, &domain)` and
+`eclipse_wallet_open_domain(domain, &wallet)` build a role-only wallet without
+the other domain or the root. A receive-only object cannot return spend keys.
+The full wallet contains both domains' derived private keys, so it is not a
+view-only object. Free root/domain objects when no longer needed; their owned
+buffers are cleansed. There is no automatic backup or disk persistence.
+
+The root and each role domain have separate explicit Base92 export/import
+functions. The text is an **unencrypted secret** and caller-owned text buffers
+must be cleansed. Root exports can rebuild both roles; receive-domain exports
+can rebuild only receive, and spend-domain exports only spend. Packet formats
+are `EWRT || version || scheme || root || SHA-256` and
+`EWDM || version || scheme || role || domain secret || SHA-256`. The checksum
+detects accidental damage, not malicious modification. The codec follows the
 [thenoviceoof/base92 format](https://github.com/thenoviceoof/base92/blob/master/python/docs/encoding.md)
-and rejects noncanonical strings when decoding. The export packet is `EWMS`,
-version 1, role byte, scheme byte, two-byte big-endian private-key length,
-expanded FIPS 204 private bytes, and a 32-byte SHA-256 checksum. The checksum
-only detects accidental corruption; it does not protect against deliberate
-changes. No import, backup, or disk storage is implemented. Exporting a master
-does not preserve or recreate the 24 independent child private keys.
+and rejects noncanonical text. An older `EWMS` master-private export cannot
+restore the old independently random children and is no longer used.
+
+Each role master signs its child public keys with a context, role, scheme, and
+index; the wallet can verify these bindings. A separate public verifier rejects
+a wrong master, role, or index. Binding signatures are not part of the network
+key packet: publishing several under one master would reveal a link between
+keys. The 24 receive ML-DSA keys currently represent only a key-management
+prototype, **not** a working private-note discovery mechanism. Actual viewing
+keys depend on the future transaction format. The KDF's dev labels and fixed
+24-slot pools are not mainnet consensus specifications.
 
 For a future network transport, `eclipse_wallet_public_serialize` encodes one
 public key as `EWPK`, version 1, scheme byte, two-byte big-endian length, and
