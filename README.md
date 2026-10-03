@@ -169,13 +169,24 @@ keys depend on the future transaction format. The KDF's dev labels and fixed
 24-slot pools are not mainnet consensus specifications.
 
 For a future network transport, `eclipse_wallet_public_serialize` encodes one
-public key as `EWPK`, version 1, scheme byte, two-byte big-endian length, and
-the public key bytes. Its Base92 form carries the same packet. This is a
+public key as `EWPK`, version 2, scheme byte, two-byte big-endian key length,
+the public key bytes, and SHA-256 over all preceding packet bytes. Version 1
+packets are rejected. The checksum detects accidental corruption but cannot
+authenticate a key. Its Base92 form carries the same packet. This is a
 provisional developer format, not a consensus object. It includes no role,
 index, master public key, or master signature, so it does not link the pools
 through this packet. There is no receive or spend transaction logic yet. The
 separation of master keys alone cannot enforce spending permissions; future
 consensus rules must define and check them.
+
+Raw ML-DSA public-key import checks the scheme and exact FIPS 204 length and
+asks OpenSSL to validate the public component. The packed public-key fields
+have no additional invalid byte patterns at that length, so a modified raw
+key can still be a different syntactically valid key. The EWPK checksum catches
+unintentional changes to the packet. To establish who supplied a key, a caller
+must verify a binding signature or use another authenticated channel. The
+32-byte wallet recovery and domain secrets likewise have no internal syntax;
+their Base92 packets check version, role, scheme, length, and checksum.
 
 ## Logging
 

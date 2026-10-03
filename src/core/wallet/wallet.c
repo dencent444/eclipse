@@ -5,11 +5,14 @@
 #include "../log.h"
 
 #include <openssl/crypto.h>
+#include <openssl/evp.h>
 
 #include <stdlib.h>
 #include <string.h>
 
 #define PUBLIC_PACKET_HEADER_SIZE 8u
+#define PUBLIC_PACKET_CHECKSUM_SIZE 32u
+#define PUBLIC_PACKET_VERSION 2u
 #define CHILD_BINDING_HEADER_SIZE 8u
 
 static const uint8_t binding_context[] = "ECLIPSE/WALLET/CHILD/V1";
@@ -437,11 +440,13 @@ size_t eclipse_wallet_public_serialized_size(eclipse_ml_dsa_scheme_t scheme)
 {
     eclipse_ml_dsa_info_t info;
     if (!eclipse_ml_dsa_info(scheme, &info)) return 0;
-    return PUBLIC_PACKET_HEADER_SIZE + info.public_key_size;
+    return PUBLIC_PACKET_HEADER_SIZE + info.public_key_size +
+           PUBLIC_PACKET_CHECKSUM_SIZE;
 }
 
 /* Write one versioned EWPK packet: magic, version, scheme, big-endian length,
- * then exact public bytes. Validate the supplied public key before emission. */
+ * public bytes, then SHA-256 of all preceding bytes. Validate the supplied
+ * public key before emission. The digest detects corruption, not forgery. */
 eclipse_error_t eclipse_wallet_public_serialize(const eclipse_wallet_public_key_t *key,
                                                  uint8_t *output, size_t capacity,
                                                  size_t *written)
@@ -456,7 +461,8 @@ eclipse_error_t eclipse_wallet_public_serialize(const eclipse_wallet_public_key_
         return ECLIPSE_ERROR_NULL_POINTER;
     }
     size_t size = eclipse_wallet_public_serialized_size(key->scheme);
-    if (size == 0 || key->length != size - PUBLIC_PACKET_HEADER_SIZE) {
+    if (size == 0 || key->length != size - PUBLIC_PACKET_HEADER_SIZE -
+                                    PUBLIC_PACKET_CHECKSUM_SIZE) {
         ECLIPSE_LOG_WARNING("public serialization rejected scheme or key length");
         return ECLIPSE_ERROR_INVALID_ARGUMENT;
     }
@@ -472,18 +478,28 @@ eclipse_error_t eclipse_wallet_public_serialize(const eclipse_wallet_public_key_
     eclipse_ml_dsa_key_free(checked);
     if (status != ECLIPSE_SUCCESS) return status;
     memcpy(output, "EWPK", 4);
-    output[4] = 1;
+    output[4] = PUBLIC_PACKET_VERSION;
     output[5] = wire_scheme(key->scheme);
     output[6] = (uint8_t)(key->length >> 8);
     output[7] = (uint8_t)key->length;
     memcpy(output + PUBLIC_PACKET_HEADER_SIZE, key->bytes, key->length);
+    size_t digest_length = 0;
+    if (EVP_Q_digest(NULL, "SHA2-256", NULL, output,
+                     size - PUBLIC_PACKET_CHECKSUM_SIZE,
+                     output + size - PUBLIC_PACKET_CHECKSUM_SIZE,
+                     &digest_length) != 1 ||
+        digest_length != PUBLIC_PACKET_CHECKSUM_SIZE) {
+        OPENSSL_cleanse(output, size);
+        ECLIPSE_LOG_ERROR("wallet public-key checksum generation failed");
+        return ECLIPSE_ERROR_CRYPTO_FAILURE;
+    }
     *written = size;
     ECLIPSE_LOG_INFO(5, "wallet public key serialized");
     return ECLIPSE_SUCCESS;
 }
 
 /* Parse an untrusted EWPK packet into a temporary object. Assign *out only
- * after the header, declared size, and ML-DSA public bytes all validate. */
+ * after the header, declared size, checksum, and ML-DSA public bytes validate. */
 eclipse_error_t eclipse_wallet_public_deserialize(const uint8_t *input, size_t length,
                                                    eclipse_wallet_public_key_t *out)
 {
@@ -492,7 +508,7 @@ eclipse_error_t eclipse_wallet_public_deserialize(const uint8_t *input, size_t l
         return ECLIPSE_ERROR_NULL_POINTER;
     }
     if (length < PUBLIC_PACKET_HEADER_SIZE || memcmp(input, "EWPK", 4) != 0 ||
-        input[4] != 1) {
+        input[4] != PUBLIC_PACKET_VERSION) {
         ECLIPSE_LOG_INFO(4, "public packet rejected: header invalid");
         return ECLIPSE_ERROR_INVALID_ARGUMENT;
     }
@@ -500,8 +516,24 @@ eclipse_error_t eclipse_wallet_public_deserialize(const uint8_t *input, size_t l
     size_t expected = eclipse_wallet_public_serialized_size(scheme);
     size_t declared = ((size_t)input[6] << 8) | input[7];
     if (expected == 0 || length != expected ||
-        declared != expected - PUBLIC_PACKET_HEADER_SIZE) {
+        declared != expected - PUBLIC_PACKET_HEADER_SIZE -
+                    PUBLIC_PACKET_CHECKSUM_SIZE) {
         ECLIPSE_LOG_INFO(4, "public packet rejected: scheme or length invalid");
+        return ECLIPSE_ERROR_INVALID_ARGUMENT;
+    }
+
+    uint8_t digest[PUBLIC_PACKET_CHECKSUM_SIZE];
+    size_t digest_length = 0;
+    int digest_ok = EVP_Q_digest(NULL, "SHA2-256", NULL, input,
+                                  length - PUBLIC_PACKET_CHECKSUM_SIZE,
+                                  digest, &digest_length) == 1;
+    if (!digest_ok || digest_length != PUBLIC_PACKET_CHECKSUM_SIZE) {
+        ECLIPSE_LOG_ERROR("wallet public-key checksum calculation failed");
+        return ECLIPSE_ERROR_CRYPTO_FAILURE;
+    }
+    if (CRYPTO_memcmp(digest, input + length - PUBLIC_PACKET_CHECKSUM_SIZE,
+                      PUBLIC_PACKET_CHECKSUM_SIZE) != 0) {
+        ECLIPSE_LOG_INFO(4, "public packet rejected: checksum mismatch");
         return ECLIPSE_ERROR_INVALID_ARGUMENT;
     }
 
@@ -528,7 +560,8 @@ eclipse_error_t eclipse_wallet_public_to_base92(const eclipse_wallet_public_key_
     if (written == NULL) return ECLIPSE_ERROR_NULL_POINTER;
     *written = 0;
     if (key == NULL || output == NULL) return ECLIPSE_ERROR_NULL_POINTER;
-    uint8_t raw[PUBLIC_PACKET_HEADER_SIZE + ECLIPSE_WALLET_PUBLIC_MAX_SIZE];
+    uint8_t raw[PUBLIC_PACKET_HEADER_SIZE + ECLIPSE_WALLET_PUBLIC_MAX_SIZE +
+                PUBLIC_PACKET_CHECKSUM_SIZE];
     size_t raw_length = 0;
     eclipse_error_t status = eclipse_wallet_public_serialize(key, raw,
                                                               sizeof(raw), &raw_length);
@@ -542,7 +575,8 @@ eclipse_error_t eclipse_wallet_public_from_base92(const char *text, size_t lengt
                                                    eclipse_wallet_public_key_t *out)
 {
     if (text == NULL || out == NULL) return ECLIPSE_ERROR_NULL_POINTER;
-    uint8_t raw[PUBLIC_PACKET_HEADER_SIZE + ECLIPSE_WALLET_PUBLIC_MAX_SIZE];
+    uint8_t raw[PUBLIC_PACKET_HEADER_SIZE + ECLIPSE_WALLET_PUBLIC_MAX_SIZE +
+                PUBLIC_PACKET_CHECKSUM_SIZE];
     if (length >= eclipse_base92_encoded_capacity(sizeof(raw)))
         return ECLIPSE_ERROR_INVALID_ARGUMENT;
     size_t raw_length = 0;

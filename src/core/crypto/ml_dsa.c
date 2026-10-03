@@ -139,7 +139,10 @@ eclipse_error_t eclipse_ml_dsa_generate_from_seed(eclipse_ml_dsa_scheme_t scheme
 }
 
 /* Import untrusted public bytes: check their exact length, ask the provider
- * to parse them, then run the provider's public-key validation. */
+ * to parse them, then run the provider's public-key validation. FIPS 204's
+ * packed public-key fields have no spare invalid encodings at this length;
+ * these checks cannot establish where a key came from or detect a changed
+ * key in a bare byte string. Transport integrity belongs to the packet. */
 eclipse_error_t eclipse_ml_dsa_import_public(eclipse_ml_dsa_scheme_t scheme,
                                              const uint8_t *bytes, size_t length,
                                              eclipse_ml_dsa_key_t **out)

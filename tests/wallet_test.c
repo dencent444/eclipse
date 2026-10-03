@@ -81,10 +81,12 @@ static void check_public_transport(const eclipse_wallet_t *wallet)
     eclipse_wallet_public_key_t child;
     CHECK(eclipse_wallet_child_public(wallet, ECLIPSE_WALLET_RECEIVE, 0,
                                       &child) == ECLIPSE_SUCCESS);
-    uint8_t wire[8 + ECLIPSE_WALLET_PUBLIC_MAX_SIZE];
+    uint8_t wire[8 + ECLIPSE_WALLET_PUBLIC_MAX_SIZE + 32 + 1];
     size_t wire_length = 0;
     CHECK(eclipse_wallet_public_serialize(&child, wire, sizeof(wire),
                                           &wire_length) == ECLIPSE_SUCCESS);
+    CHECK(wire_length == eclipse_wallet_public_serialized_size(child.scheme));
+    CHECK(wire[4] == 2);
     eclipse_wallet_public_key_t parsed = {0};
     CHECK(eclipse_wallet_public_deserialize(wire, wire_length,
                                             &parsed) == ECLIPSE_SUCCESS);
@@ -99,8 +101,42 @@ static void check_public_transport(const eclipse_wallet_t *wallet)
     CHECK(eclipse_wallet_public_from_base92(text, text_length,
                                             &parsed) == ECLIPSE_SUCCESS);
     CHECK(memcmp(parsed.bytes, child.bytes, child.length) == 0);
+    /* The public key encoding itself has no spare invalid byte patterns.
+       Packet integrity catches a changed key, while header and size checks
+       reject unsupported interpretations before the key reaches OpenSSL. */
+    uint8_t changed[sizeof(wire)];
+    memcpy(changed, wire, wire_length);
+    changed[8] ^= 1;
+    CHECK(eclipse_wallet_public_deserialize(changed, wire_length, &parsed) ==
+          ECLIPSE_ERROR_INVALID_ARGUMENT);
+    memcpy(changed, wire, wire_length);
+    changed[wire_length - 1] ^= 1;
+    CHECK(eclipse_wallet_public_deserialize(changed, wire_length, &parsed) ==
+          ECLIPSE_ERROR_INVALID_ARGUMENT);
+    memcpy(changed, wire, wire_length);
+    changed[4] = 1;
+    CHECK(eclipse_wallet_public_deserialize(changed, wire_length, &parsed) ==
+          ECLIPSE_ERROR_INVALID_ARGUMENT);
+    memcpy(changed, wire, wire_length);
+    changed[5] = 0xff;
+    CHECK(eclipse_wallet_public_deserialize(changed, wire_length, &parsed) ==
+          ECLIPSE_ERROR_INVALID_ARGUMENT);
+    memcpy(changed, wire, wire_length);
+    changed[7] ^= 1;
+    CHECK(eclipse_wallet_public_deserialize(changed, wire_length, &parsed) ==
+          ECLIPSE_ERROR_INVALID_ARGUMENT);
     CHECK(eclipse_wallet_public_deserialize(wire, wire_length - 1,
                                             &parsed) == ECLIPSE_ERROR_INVALID_ARGUMENT);
+    CHECK(eclipse_wallet_public_deserialize(wire, wire_length + 1,
+                                            &parsed) == ECLIPSE_ERROR_INVALID_ARGUMENT);
+    CHECK(memcmp(parsed.bytes, child.bytes, child.length) == 0);
+    eclipse_wallet_public_key_t invalid_key = child;
+    invalid_key.length--;
+    CHECK(eclipse_wallet_public_serialize(&invalid_key, changed, sizeof(changed),
+                                          &wire_length) == ECLIPSE_ERROR_INVALID_ARGUMENT);
+    text[0] = text[0] == '!' ? '#' : '!';
+    CHECK(eclipse_wallet_public_from_base92(text, text_length, &parsed) ==
+          ECLIPSE_ERROR_INVALID_ARGUMENT);
     free(text);
 }
 

@@ -94,8 +94,9 @@ eclipse_error_t eclipse_wallet_verify_child_binding(const eclipse_wallet_t *wall
                                                      eclipse_wallet_role_t role,
                                                      size_t index, bool *valid);
 
-/* Versioned developer transport format for ONE public key; not a consensus
- * object. Both binary and Base92 forms contain exactly the same public data. */
+/* Version 2 developer transport format for ONE public key; not a consensus
+ * object. Both forms contain the same public data and SHA-256 checksum.
+ * The checksum detects accidental corruption, not a forged replacement key. */
 size_t eclipse_wallet_public_serialized_size(eclipse_ml_dsa_scheme_t scheme);
 eclipse_error_t eclipse_wallet_public_serialize(const eclipse_wallet_public_key_t *key,
                                                  uint8_t *output, size_t capacity,
