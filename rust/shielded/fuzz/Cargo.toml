@@ -1,0 +1,22 @@
+[package]
+name = "eclipse-shielded-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+eclipse-shielded = { path = ".." }
+
+[[bin]]
+name = "esx1_decode"
+path = "fuzz_targets/esx1_decode.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

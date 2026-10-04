@@ -1,4 +1,12 @@
 /build/
+/build-fuzz/
+/fuzz-corpus/
+/fuzz-artifacts/
+/fuzz-*.log
+/rust/shielded/target/
+/rust/shielded/fuzz/target/
+/rust/shielded/fuzz/corpus/
+/rust/shielded/fuzz/artifacts/
 /dev-node/
 /node-a/
 /node-b/

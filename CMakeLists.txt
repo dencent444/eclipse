@@ -50,8 +50,70 @@ target_link_libraries(eclipse-cli PRIVATE eclipse_core ${CURSES_LIBRARIES})
 add_executable(eclipse-node src/node/main.c src/node/p2p.c src/node/tor_onion.c)
 target_link_libraries(eclipse-node PRIVATE eclipse_core)
 
+# The shielded verifier is an opt-in, verifier-only Rust/C boundary. EBL1
+# blocks do not carry ESX1 yet, so building this does not activate new rules.
+option(ECLIPSE_BUILD_SHIELDED "Build experimental Orchard verifier bridge" OFF)
+if(ECLIPSE_BUILD_SHIELDED)
+    find_program(ECLIPSE_CARGO_EXECUTABLE cargo REQUIRED)
+    set(ECLIPSE_SHIELDED_CARGO_TARGET_DIR
+        "${CMAKE_BINARY_DIR}/rust-shielded" CACHE PATH
+        "Cargo target directory for the experimental verifier")
+    set(ECLIPSE_SHIELDED_RUST_TARGET "" CACHE STRING
+        "Rust target triple when cross compiling the experimental verifier")
+    if(CMAKE_CROSSCOMPILING AND ECLIPSE_SHIELDED_RUST_TARGET STREQUAL "")
+        message(FATAL_ERROR "Set ECLIPSE_SHIELDED_RUST_TARGET to the C toolchain's Rust target triple")
+    endif()
+    set(ECLIPSE_SHIELDED_CARGO_TARGET_ARGS)
+    set(ECLIPSE_SHIELDED_RUST_PROFILE_DIR "${ECLIPSE_SHIELDED_CARGO_TARGET_DIR}")
+    if(NOT ECLIPSE_SHIELDED_RUST_TARGET STREQUAL "")
+        list(APPEND ECLIPSE_SHIELDED_CARGO_TARGET_ARGS
+            --target "${ECLIPSE_SHIELDED_RUST_TARGET}")
+        set(ECLIPSE_SHIELDED_RUST_PROFILE_DIR
+            "${ECLIPSE_SHIELDED_CARGO_TARGET_DIR}/${ECLIPSE_SHIELDED_RUST_TARGET}")
+    endif()
+    set(ECLIPSE_SHIELDED_RUST_LIB
+        "${ECLIPSE_SHIELDED_RUST_PROFILE_DIR}/debug/libeclipse_shielded.a")
+    add_custom_command(OUTPUT "${ECLIPSE_SHIELDED_RUST_LIB}"
+        COMMAND "${CMAKE_COMMAND}" -E env
+            "CARGO_TARGET_DIR=${ECLIPSE_SHIELDED_CARGO_TARGET_DIR}"
+            "${ECLIPSE_CARGO_EXECUTABLE}" build --locked --lib
+            ${ECLIPSE_SHIELDED_CARGO_TARGET_ARGS}
+            --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/rust/shielded/Cargo.toml"
+        DEPENDS
+            rust/shielded/Cargo.toml rust/shielded/Cargo.lock
+            rust/shielded/src/lib.rs rust/shielded/src/tx.rs
+            rust/shielded/src/ledger.rs rust/shielded/src/ffi.rs
+        VERBATIM)
+    add_custom_target(eclipse_shielded_cargo DEPENDS "${ECLIPSE_SHIELDED_RUST_LIB}")
+    add_library(eclipse_shielded_rust STATIC IMPORTED GLOBAL)
+    set_target_properties(eclipse_shielded_rust PROPERTIES
+        IMPORTED_LOCATION "${ECLIPSE_SHIELDED_RUST_LIB}")
+    add_dependencies(eclipse_shielded_rust eclipse_shielded_cargo)
+    add_library(eclipse_shielded_bridge STATIC src/core/shielded/shielded.c)
+    target_link_libraries(eclipse_shielded_bridge PUBLIC
+        eclipse_shielded_rust eclipse_core Threads::Threads ${CMAKE_DL_LIBS} m)
+endif()
+
+# Explicit opt-in for Clang/libFuzzer. Configure a separate build tree with
+# -fsanitize=fuzzer-no-link,address,undefined so ordinary binaries still link.
+option(ECLIPSE_BUILD_FUZZ "Build libFuzzer parser harness" OFF)
+if(ECLIPSE_BUILD_FUZZ)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "ECLIPSE_BUILD_FUZZ requires Clang/libFuzzer")
+    endif()
+    add_executable(eclipse-fuzz-decode tests/fuzz_decode.c)
+    target_link_libraries(eclipse-fuzz-decode PRIVATE eclipse_core)
+    target_link_options(eclipse-fuzz-decode PRIVATE -fsanitize=fuzzer)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
+    if(ECLIPSE_BUILD_SHIELDED)
+        add_executable(shielded_bridge_test tests/shielded_bridge_test.c)
+        target_link_libraries(shielded_bridge_test PRIVATE eclipse_shielded_bridge)
+        add_test(NAME shielded_bridge_test COMMAND shielded_bridge_test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/esx1_reward.bin")
+    endif()
     math(EXPR ECLIPSE_TEST_POINTER_BITS "${CMAKE_SIZEOF_VOID_P} * 8")
     add_executable(block_header_test tests/serialize_deserialize_test1.c)
     target_link_libraries(block_header_test PRIVATE eclipse_core)

@@ -32,6 +32,51 @@ ncurses, and libcurl libraries for the target system. The existing block,
 wallet packet, and particle encodings use explicit byte layouts rather than
 native C structs. Python 3 enables the process-level node integration test.
 
+### Fuzzing peer packet decoders
+
+With Clang and libFuzzer installed, run a bounded local ASan/UBSan campaign:
+
+```sh
+./scripts/fuzz_decode.sh 300
+```
+
+The script builds a separate `build-fuzz/`, seeds `fuzz-corpus/` with a valid
+signed transaction and mined block, then mutates transaction and block wire
+bytes. Accepted packets must serialize back to the same bytes. A sanitizer
+failure or round-trip mismatch stops the run and saves its input in
+`fuzz-artifacts/`. These directories are ignored by Git. The harness exercises
+decoders and canonical encodings; chain state, P2P scheduling, and privacy
+proofs need separate fuzz targets.
+
+### Experimental shielded pool
+
+`rust/shielded` contains a separately versioned Orchard-based `ESX1` prototype.
+It creates a hidden reward note, spends it into a private payment and change,
+checks Halo 2 proofs and signatures, decodes canonical packets, and tracks a
+bounded branch-local commitment tree and nullifier set. Its C verifier bridge
+is opt-in. Existing `EBL1` blocks and `eclipse-node` do not accept `ESX1`;
+the network remains transparent. See [privacy.md](privacy.md) for the exact
+wire draft and remaining consensus work.
+
+```sh
+cargo test --manifest-path rust/shielded/Cargo.toml
+cmake -S . -B build -DECLIPSE_BUILD_SHIELDED=ON
+cmake --build build --target shielded_bridge_test
+ctest --test-dir build -R shielded_bridge_test --output-on-failure
+```
+
+The second build needs Rust 1.88 or newer and space for Orchard and Halo 2.
+Set `ECLIPSE_SHIELDED_CARGO_TARGET_DIR` to an appropriate build volume if the
+default build directory is small. The Rust fuzz target is in
+`rust/shielded/fuzz/fuzz_targets/esx1_decode.rs`; its seed can be generated
+with `cargo run --manifest-path rust/shielded/Cargo.toml --example esx1_fixture`
+and redirected to a corpus file. Run it with `cargo fuzz run esx1_decode`
+from `rust/shielded` after installing `cargo-fuzz`; AddressSanitizer requires a
+nightly Rust toolchain, while `--sanitizer none` works on stable Rust. The
+existing ML-DSA wallet does not yet derive Orchard keys or scan `ESX1` notes.
+For cross builds, set `ECLIPSE_SHIELDED_RUST_TARGET` to a Rust target triple
+matching the C toolchain.
+
 ## Local developer node
 
 Start the node in one terminal. `DATA_DIR` is created with mode `0700` if it
@@ -87,7 +132,7 @@ The control socket is `DATA_DIR/node.sock` with mode `0600`; the persistent
 journal is `DATA_DIR/chain.dat`. The mempool is deliberately volatile. The
 node's block timestamps increment from the parent, following the current
 developer consensus rule. There is no real-time block schedule, automatic
-mining, or private transaction format yet. The local control protocol is
+mining, or active private transaction format yet. The local control protocol is
 separate from P2P.
 
 ## Developer P2P between two nodes

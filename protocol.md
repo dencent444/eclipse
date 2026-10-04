@@ -1,5 +1,8 @@
 # Eclipse protocol sketch (developer v0)
 
+The proposed private-pool boundary and validation properties are recorded in
+[`privacy.md`](privacy.md). They are not active consensus rules.
+
 This document records implemented bytes and the intended boundaries of the
 experiment. It is **not** a mainnet consensus specification. Changing a
 commitment or transaction encoding requires a new version and test vectors.
