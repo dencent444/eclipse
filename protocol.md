@@ -77,6 +77,14 @@ and UTXO rules. Fixed 8-bit work is intentionally cheap for local experiments.
 
 ## Local chain journal and mempool
 
+`eclipse-node run DATA_DIR` owns one journal writer and one Unix socket
+`DATA_DIR/node.sock`. Its `ctl` commands are local developer control calls,
+not consensus messages or peer networking. The process replays the journal
+before listening, validates incoming transaction and block wire bytes using
+the core APIs, refreshes the mempool after tip changes, and removes its socket
+on a clean stop. A killed process may leave a stale socket, which a new owner
+of the locked journal removes at startup. No wallet secret enters node storage.
+
 `eclipse_chain_open(path)` creates or opens an exclusive-writer local journal.
 The file starts with ASCII `ECS1` followed by the 32-byte dev genesis hash.
 Each record is `block_length_u32be || canonical_block_wire ||

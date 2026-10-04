@@ -5,7 +5,8 @@ ML-DSA wrappers, an in-memory wallet key skeleton, an eclipse-particle
 commitment prototype, a transparent developer transaction with an in-memory
 UTXO set, an in-memory developer PoW chain with miner rewards and competing
 branches, a local chain journal, a volatile mempool, and transport wrappers.
-The chain is not a networked full node yet.
+The chain now also has a standalone local node process and a private Unix
+socket control API. It is not a networked full node yet.
 
 ## Build and test
 
@@ -28,7 +29,51 @@ into the binary. It uses target compiler macros, which also work when building
 with a CMake cross-compilation toolchain. A cross build still needs OpenSSL and
 ncurses, and libcurl libraries for the target system. The existing block,
 wallet packet, and particle encodings use explicit byte layouts rather than
-native C structs.
+native C structs. Python 3 enables the process-level node integration test.
+
+## Local developer node
+
+Start the node in one terminal. `DATA_DIR` is created with mode `0700` if it
+does not exist; an existing directory must belong to your user and be private.
+The process runs in the foreground. It holds the journal's exclusive writer
+lock and replays every saved block through normal validation at startup.
+
+```sh
+./build/eclipse-node run ./dev-node --log-level 2
+```
+
+Use a second terminal to send one local command per connection:
+
+```sh
+./build/eclipse-node ctl ./dev-node status
+./build/eclipse-node ctl ./dev-node mempool
+./build/eclipse-node ctl ./dev-node mine PUBLIC_BASE92
+./build/eclipse-node ctl ./dev-node utxo TXID_HEX 0
+./build/eclipse-node ctl ./dev-node submit-tx SIGNED_TX_HEX
+./build/eclipse-node ctl ./dev-node submit-block BLOCK_HEX
+./build/eclipse-node ctl ./dev-node get-block BLOCK_HASH_HEX
+./build/eclipse-node ctl ./dev-node stop
+```
+
+`mine` takes one EWPK Base92 public packet and mines a block containing up to
+eight pending transactions. Use a **spend-child public packet** if you intend
+to spend the reward with the current wallet helper. The node receives no
+private key. For a disposable development wallet, obtain a root with
+`eclipse-cli wallet create 44` and derive a public packet with
+`eclipse-cli wallet public ROOT spend 0`. Protect that unencrypted root
+yourself; the node never needs it.
+The `mine` result gives the block tip and reward outpoint. `submit-tx` and
+`submit-block` parse and validate supplied wire packets before admitting them.
+When a submitted block changes the canonical tip, the node refreshes the
+mempool. `get-block` returns the canonical wire packet of an accepted block;
+`utxo` queries the current canonical state.
+
+The control socket is `DATA_DIR/node.sock` with mode `0600`; the persistent
+journal is `DATA_DIR/chain.dat`. The mempool is deliberately volatile. The
+node's block timestamps increment from the parent, following the current
+developer consensus rule. There is no real-time block schedule, P2P relay,
+automatic mining, Tor transport, or private transaction format yet. This
+local control protocol is for developer use and is not a P2P protocol.
 
 ## Network wrappers
 
