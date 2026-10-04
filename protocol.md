@@ -9,8 +9,8 @@ commitment or transaction encoding requires a new version and test vectors.
 The empty genesis is the fixed SHA3-256 digest of ASCII
 `ECLIPSE/DEV/GENESIS/V1`. It has height zero and **zero spendable supply**.
 Height one is the first mined block. The chain can run in memory or replay
-an append-only local journal. This is not a public mainnet or a networked
-full node.
+an append-only local journal. Developer nodes can exchange validated data over
+the provisional P2P protocol below; this is not a public mainnet.
 
 A block has at most eight signed `ETX0` transactions. Its exact wire form is:
 
@@ -70,8 +70,9 @@ transaction applies. Snapshot cloning still copies every live output for
 each accepted block, so long chains and many side branches can consume large
 amounts of RAM. The optional disk journal retains every accepted block,
 including side branches, and replays them through the same validator on open.
-It does not yet adjust difficulty, accept untrusted peers, synchronize over
-P2P, or enforce wall-clock future-time limits. A block decoder checks the
+It does not yet adjust difficulty or enforce wall-clock future-time limits.
+The developer P2P transport accepts untrusted peer bytes, but its resource
+controls are not sufficient for a public network. A block decoder checks the
 packet and root; only chain acceptance checks parent, PoW, reward, signatures,
 and UTXO rules. Fixed 8-bit work is intentionally cheap for local experiments.
 
@@ -109,7 +110,45 @@ it rebuilds against the new state, removes confirmed/conflicting transfers,
 and reconsiders transactions from disconnected blocks in block order.
 Pending transactions are not stored in the chain journal and are lost on
 process exit. There is no fee prioritization, replacement-by-fee, expiry,
-peer relay, or mempool persistence yet.
+or mempool persistence yet. The developer P2P layer relays pending transfers.
+
+## Developer P2P wire protocol (EPN1)
+
+P2P runs on a **separate TCP listener** when `--p2p-listen HOST PORT` is
+supplied. The Unix control socket is never shared with peers. `--peer HOST
+PORT` configures one static outbound peer; the node reconnects periodically.
+For onion peers, `--tor-socks HOST PORT` routes the connection through SOCKS5
+using domain-name mode, so the onion hostname is sent to Tor without local DNS
+resolution. Tor itself owns the onion service and forwards its virtual TCP
+port to the node's local P2P listener. No UDP or automatic onion creation is
+implemented.
+
+Each P2P frame is `ASCII("EPN1") || type_u8 || length_u32be || payload`.
+Payloads are capped at `ECLIPSE_BLOCK_MAX_WIRE_SIZE`; oversized frames are
+rejected before allocating from their lengths. Types are `HELLO=1`,
+`LOCATORS=2`, `BLOCK=3`, `TRANSACTION=4`, `END=5`. A session has a 20-second
+monotonic deadline checked between I/O operations and a three-second socket
+I/O timeout. A HELLO contains protocol version 1, dev network ID `EVD1`, the
+fixed genesis hash, advertised height and tip hash, and a random 16-byte
+process ID. Version/network/genesis mismatches and self-connections are
+rejected. Advertised heights and hashes are hints, not trusted state.
+
+A locator payload has one count byte (1–32), then entries of `height_u64be ||
+block_hash[32]`. A node sends its recent canonical ancestors with exponential
+backoff to genesis and may prepend its last downloaded side-branch block.
+The peer chooses the first locator that matches its own canonical history.
+It sends up to 128 successive canonical block packets and an `END` frame.
+The two sides repeat this in the opposite direction, then each sends up to 64
+pending signed transactions and `END`. Later sessions continue partial sync.
+
+The receiver independently decodes and validates each new block through
+`eclipse_chain_accept`. A new canonical tip triggers mempool reconciliation.
+Every relayed transaction goes through `eclipse_mempool_submit`; duplicates and
+conflicts are not admitted. Peers provide data, never consensus authority.
+Current limits still allow algorithmic and storage denial of service on an
+open network: every accepted block retains a UTXO snapshot, difficulty is
+fixed at eight bits, and there is no peer reputation, orphan cache, snapshot
+sync, or production-grade ingress scheduling.
 
 ## Transparent transaction (developer v0)
 

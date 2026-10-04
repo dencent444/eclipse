@@ -172,6 +172,56 @@ eclipse_error_t eclipse_chain_tip(const eclipse_chain_t *chain,
     return ECLIPSE_SUCCESS;
 }
 
+eclipse_error_t eclipse_chain_canonical_hash_at_height(
+    const eclipse_chain_t *chain, uint64_t height, uint8_t out[32])
+{
+    if (chain == NULL || out == NULL) return ECLIPSE_ERROR_NULL_POINTER;
+    if (height == 0) {
+        memcpy(out, chain->genesis, 32);
+        return ECLIPSE_SUCCESS;
+    }
+    if (chain->tip == SIZE_MAX || height > chain->entries[chain->tip].height)
+        return ECLIPSE_ERROR_INVALID_ARGUMENT;
+    /* Parent indexes are immutable after acceptance, including on reorgs. */
+    for (size_t i = chain->tip; i != SIZE_MAX; i = chain->entries[i].parent) {
+        if (chain->entries[i].height == height) {
+            memcpy(out, chain->entries[i].hash, 32);
+            return ECLIPSE_SUCCESS;
+        }
+    }
+    return ECLIPSE_ERROR_INVALID_ARGUMENT;
+}
+
+bool eclipse_chain_has_block(const eclipse_chain_t *chain, const uint8_t hash[32])
+{
+    return chain != NULL && hash != NULL && find_index(chain, hash) != SIZE_MAX;
+}
+
+eclipse_error_t eclipse_chain_block_height(const eclipse_chain_t *chain,
+                                           const uint8_t hash[32],
+                                           uint64_t *height)
+{
+    if (chain == NULL || hash == NULL || height == NULL)
+        return ECLIPSE_ERROR_NULL_POINTER;
+    if (memcmp(hash, chain->genesis, 32) == 0) { *height = 0; return ECLIPSE_SUCCESS; }
+    size_t i = find_index(chain, hash);
+    if (i == SIZE_MAX) return ECLIPSE_ERROR_INVALID_ARGUMENT;
+    *height = chain->entries[i].height;
+    return ECLIPSE_SUCCESS;
+}
+
+eclipse_error_t eclipse_chain_last_accepted(const eclipse_chain_t *chain,
+                                            uint8_t hash[32], uint64_t *height)
+{
+    if (chain == NULL || hash == NULL || height == NULL)
+        return ECLIPSE_ERROR_NULL_POINTER;
+    if (chain->count == 0) return ECLIPSE_ERROR_INVALID_ARGUMENT;
+    const chain_entry_t *last = &chain->entries[chain->count - 1];
+    memcpy(hash, last->hash, 32);
+    *height = last->height;
+    return ECLIPSE_SUCCESS;
+}
+
 eclipse_error_t eclipse_chain_find_utxo(const eclipse_chain_t *chain,
     const uint8_t txid[32], uint32_t index, eclipse_tx_output_t *out,
     bool *found)

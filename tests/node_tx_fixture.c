@@ -30,7 +30,8 @@ static bool reward_id(const char *hex, uint8_t id[32])
 int main(int argc, char **argv)
 {
     if (argc != 2 && argc != 3) return EXIT_FAILURE;
-    const uint8_t seed[32] = {42};
+    uint8_t seed[32] = {42};
+    if (strcmp(argv[1], "public2") == 0) seed[0] = 43;
     eclipse_ml_dsa_key_t *key = NULL;
     if (eclipse_ml_dsa_generate_from_seed(ECLIPSE_ML_DSA_44, seed,
                                            sizeof(seed), &key) != ECLIPSE_SUCCESS)
@@ -40,7 +41,8 @@ int main(int argc, char **argv)
     public.length = 1312;
     if (eclipse_ml_dsa_export_public(key, public.bytes, sizeof(public.bytes)) !=
         ECLIPSE_SUCCESS) goto fail;
-    if (strcmp(argv[1], "public") == 0 && argc == 2) {
+    if ((strcmp(argv[1], "public") == 0 ||
+         strcmp(argv[1], "public2") == 0) && argc == 2) {
         size_t capacity = eclipse_base92_encoded_capacity(
             eclipse_wallet_public_serialized_size(public.scheme));
         char *text = malloc(capacity);

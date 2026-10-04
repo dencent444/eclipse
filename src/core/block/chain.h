@@ -22,6 +22,19 @@ uint64_t eclipse_chain_subsidy(uint64_t height);
 eclipse_error_t eclipse_chain_genesis_hash(uint8_t out[32]);
 eclipse_error_t eclipse_chain_tip(const eclipse_chain_t *chain,
                                  uint8_t hash[32], uint64_t *height);
+/* Canonical locator construction and duplicate suppression for local P2P.
+ * Height zero returns the fixed genesis hash. */
+eclipse_error_t eclipse_chain_canonical_hash_at_height(
+    const eclipse_chain_t *chain, uint64_t height, uint8_t out[32]);
+bool eclipse_chain_has_block(const eclipse_chain_t *chain, const uint8_t hash[32]);
+/* Returns a validated block's height even when it is on a side branch. */
+eclipse_error_t eclipse_chain_block_height(const eclipse_chain_t *chain,
+                                           const uint8_t hash[32],
+                                           uint64_t *height);
+/* Journal order survives restart; useful for resuming a partial side-branch
+ * transfer whose blocks have not yet accumulated enough work to be canonical. */
+eclipse_error_t eclipse_chain_last_accepted(const eclipse_chain_t *chain,
+                                            uint8_t hash[32], uint64_t *height);
 /* Finds an output only in the current canonical branch. */
 eclipse_error_t eclipse_chain_find_utxo(const eclipse_chain_t *chain,
     const uint8_t txid[32], uint32_t index, eclipse_tx_output_t *out,
@@ -38,7 +51,7 @@ eclipse_error_t eclipse_chain_make_candidate(const eclipse_chain_t *chain,
 eclipse_error_t eclipse_chain_accept(eclipse_chain_t *chain,
                                      const eclipse_block_t *block,
                                      bool *became_tip);
-/* A future transport can request validated blocks by hash. Returned object is
+/* The P2P transport requests validated blocks by hash. Returned object is
  * independently owned by the caller. */
 eclipse_error_t eclipse_chain_get_block(const eclipse_chain_t *chain,
                                         const uint8_t hash[32],

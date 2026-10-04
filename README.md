@@ -5,8 +5,9 @@ ML-DSA wrappers, an in-memory wallet key skeleton, an eclipse-particle
 commitment prototype, a transparent developer transaction with an in-memory
 UTXO set, an in-memory developer PoW chain with miner rewards and competing
 branches, a local chain journal, a volatile mempool, and transport wrappers.
-The chain now also has a standalone local node process and a private Unix
-socket control API. It is not a networked full node yet.
+The chain now also has a standalone node process, a private Unix socket
+control API, and an experimental TCP P2P transport between developer nodes.
+This is not a public or production network.
 
 ## Build and test
 
@@ -47,7 +48,7 @@ Use a second terminal to send one local command per connection:
 ```sh
 ./build/eclipse-node ctl ./dev-node status
 ./build/eclipse-node ctl ./dev-node mempool
-./build/eclipse-node ctl ./dev-node mine PUBLIC_BASE92
+./build/eclipse-node ctl ./dev-node mine '<actual EWPK Base92 public packet>'
 ./build/eclipse-node ctl ./dev-node utxo TXID_HEX 0
 ./build/eclipse-node ctl ./dev-node submit-tx SIGNED_TX_HEX
 ./build/eclipse-node ctl ./dev-node submit-block BLOCK_HEX
@@ -62,6 +63,20 @@ private key. For a disposable development wallet, obtain a root with
 `eclipse-cli wallet create 44` and derive a public packet with
 `eclipse-cli wallet public ROOT spend 0`. Protect that unencrypted root
 yourself; the node never needs it.
+`PUBLIC_BASE92` in command descriptions is a placeholder, not a literal
+argument. `mine` reports `invalid_public_key` when the packet is missing or
+malformed. After `stop`, start `eclipse-node run` again before sending commands.
+For a quick local test, the public packet can be derived without placing the
+root itself in the `wallet public` process arguments:
+
+```sh
+ROOT=$(./build/eclipse-cli --log-level 0 wallet create 44)
+PUB=$(printf '%s\n' "$ROOT" | ./build/eclipse-cli --log-level 0 wallet public - spend 0)
+./build/eclipse-node ctl ./dev-node mine "$PUB"
+```
+
+Keep `ROOT` yourself before ending the shell session if you want to spend the
+mined reward later. This temporary shell variable is not a backup.
 The `mine` result gives the block tip and reward outpoint. `submit-tx` and
 `submit-block` parse and validate supplied wire packets before admitting them.
 When a submitted block changes the canonical tip, the node refreshes the
@@ -71,9 +86,54 @@ mempool. `get-block` returns the canonical wire packet of an accepted block;
 The control socket is `DATA_DIR/node.sock` with mode `0600`; the persistent
 journal is `DATA_DIR/chain.dat`. The mempool is deliberately volatile. The
 node's block timestamps increment from the parent, following the current
-developer consensus rule. There is no real-time block schedule, P2P relay,
-automatic mining, Tor transport, or private transaction format yet. This
-local control protocol is for developer use and is not a P2P protocol.
+developer consensus rule. There is no real-time block schedule, automatic
+mining, or private transaction format yet. The local control protocol is
+separate from P2P.
+
+## Developer P2P between two nodes
+
+Start each node with a separate data directory. These two terminals can be
+on the same machine; use a different port and host for a remote setup:
+
+```sh
+./build/eclipse-node run ./node-a --p2p-listen 127.0.0.1 19333
+./build/eclipse-node run ./node-b --p2p-listen 127.0.0.1 19334 --peer 127.0.0.1 19333
+```
+
+The second node periodically connects and reconnects to the static peer.
+Both sides exchange validated canonical blocks and pending transactions.
+After a fork, they compare work using the existing chain rules; a side branch
+longer than one 128-block transfer batch continues in later sessions. `status`
+shows `p2p_port`; passing port `0` asks the OS to select a free listening port.
+There is no peer discovery or peer database yet. The listener accepts one
+inbound sync session at a time.
+
+For an onion service, run Tor separately and map its virtual P2P port to the
+node's **P2P listener**, for example:
+
+```text
+HiddenServiceDir /var/lib/tor/eclipse-node/
+HiddenServicePort 19333 127.0.0.1:19333
+```
+
+Tor creates the onion hostname in that service directory; the node does not
+create or store Tor service keys. A connecting node can then use:
+
+```sh
+./build/eclipse-node run ./node-b --peer YOUR_ONION_HOST.onion 19333 --tor-socks 127.0.0.1 9050
+```
+
+The `.onion` hostname goes to the SOCKS5 proxy as a domain name; the node
+does not resolve it with local DNS. Keep the private control socket out of Tor
+port mappings. See the [Tor onion-service setup guide](https://community.torproject.org/onion-services/setup/)
+for service configuration. UDP is not part of this P2P transport.
+
+This remains a developer network: fixed eight-bit PoW, full UTXO snapshots
+per block, and limited peer resource controls make a public listener unsafe.
+Use loopback or a controlled test environment. Direct TCP connections expose
+network addresses and provide no peer authentication or transport encryption;
+onion routing requires the Tor configuration above. The exact message framing
+and validation boundaries are recorded in [`protocol.md`](protocol.md).
 
 ## Network wrappers
 

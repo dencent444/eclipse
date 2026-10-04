@@ -1,8 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 
-/* Local developer node. One request per Unix socket connection keeps the
- * control protocol small and leaves peer transport for the future P2P layer.
- * Every submitted block/transaction goes through the existing core APIs. */
+/* Local developer node. Its Unix socket is control-only; P2P uses a separate
+ * TCP listener. All chain and pool access shares one mutex with P2P workers. */
+#include "p2p.h"
 #include "block/chain.h"
 #include "block/miner.h"
 #include "log.h"
@@ -12,8 +12,10 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,7 +32,9 @@
 typedef struct {
     eclipse_chain_t *chain;
     eclipse_mempool_t *pool;
-    bool stopping;
+    pthread_mutex_t state_lock;
+    atomic_bool stopping;
+    eclipse_p2p_t *p2p;
 } node_t;
 
 static volatile sig_atomic_t interrupted = 0;
@@ -45,6 +49,8 @@ static void print_usage(void)
 {
     fputs("Usage:\n"
           "  eclipse-node run DATA_DIR [--log-level 0..5]\n"
+          "      [--p2p-listen HOST PORT] [--peer HOST PORT]\n"
+          "      [--tor-socks HOST PORT]\n"
           "  eclipse-node ctl DATA_DIR status|mempool|stop\n"
           "  eclipse-node ctl DATA_DIR mine PUBLIC_BASE92\n"
           "  eclipse-node ctl DATA_DIR submit-tx TX_HEX\n"
@@ -162,8 +168,8 @@ static void set_timeout(int fd)
 
 /* Outputs are public consensus data; do not log supplied packets, wallet
  * material, or the control request. The response is one bounded line. */
-static bool handle_command(node_t *node, char *request, char *response,
-                           size_t capacity)
+static bool handle_command_locked(node_t *node, char *request, char *response,
+                                  size_t capacity)
 {
     char *command = strtok(request, " ");
     char *first = strtok(NULL, " ");
@@ -179,8 +185,9 @@ static bool handle_command(node_t *node, char *request, char *response,
         char hex[65];
         encode_hex(tip, sizeof(tip), hex);
         (void)snprintf(response, capacity, "OK height=%" PRIu64
-                       " tip=%s mempool=%zu\n", height, hex,
-                       eclipse_mempool_count(node->pool));
+                       " tip=%s mempool=%zu p2p_port=%u\n", height, hex,
+                       eclipse_mempool_count(node->pool),
+                       (unsigned)eclipse_p2p_listen_port(node->p2p));
         ECLIPSE_LOG_INFO(3, "local node status read at height %" PRIu64, height);
         return true;
     }
@@ -191,7 +198,7 @@ static bool handle_command(node_t *node, char *request, char *response,
         return true;
     }
     if (strcmp(command, "stop") == 0 && first == NULL) {
-        node->stopping = true;
+        atomic_store(&node->stopping, true);
         (void)snprintf(response, capacity, "OK stopping\n");
         ECLIPSE_LOG_INFO(1, "local node shutdown requested");
         return true;
@@ -218,8 +225,12 @@ static bool handle_command(node_t *node, char *request, char *response,
     if (strcmp(command, "mine") == 0 && first != NULL && second == NULL) {
         eclipse_wallet_public_key_t key = {0};
         if (eclipse_wallet_public_from_base92(first, strlen(first), &key) !=
-            ECLIPSE_SUCCESS || key.length > ECLIPSE_TX_MAX_PUBLIC_KEY_SIZE)
-            goto usage;
+            ECLIPSE_SUCCESS || key.length > ECLIPSE_TX_MAX_PUBLIC_KEY_SIZE) {
+            (void)snprintf(response, capacity,
+                           "ERR invalid_public_key: expected an EWPK Base92 packet\n");
+            ECLIPSE_LOG_WARNING("local node rejected an invalid mining public key");
+            return false;
+        }
         eclipse_tx_output_t payout = {0};
         payout.scheme = key.scheme;
         payout.public_key_length = key.length;
@@ -369,7 +380,16 @@ internal:
     return false;
 }
 
-static int run_node(const char *directory)
+static bool handle_command(node_t *node, char *request, char *response,
+                           size_t capacity)
+{
+    pthread_mutex_lock(&node->state_lock);
+    bool good = handle_command_locked(node, request, response, capacity);
+    pthread_mutex_unlock(&node->state_lock);
+    return good;
+}
+
+static int run_node(const char *directory, const eclipse_p2p_config_t *p2p_config)
 {
     umask(077);
     if (!prepare_directory(directory)) {
@@ -383,12 +403,15 @@ static int run_node(const char *directory)
         return EXIT_FAILURE;
     }
     node_t node = {0};
+    if (pthread_mutex_init(&node.state_lock, NULL) != 0) return EXIT_FAILURE;
+    atomic_init(&node.stopping, false);
     eclipse_error_t status = eclipse_chain_open(journal, &node.chain);
     if (status == ECLIPSE_SUCCESS)
         status = eclipse_mempool_create(node.chain, &node.pool);
     if (status != ECLIPSE_SUCCESS) {
         ECLIPSE_LOG_ERROR("node startup failed while opening local state: %d", status);
         eclipse_chain_free(node.chain);
+        (void)pthread_mutex_destroy(&node.state_lock);
         return EXIT_FAILURE;
     }
 
@@ -419,7 +442,6 @@ static int run_node(const char *directory)
     (void)sigaction(SIGINT, &action, NULL);
     (void)sigaction(SIGTERM, &action, NULL);
     (void)signal(SIGPIPE, SIG_IGN);
-    ECLIPSE_LOG_INFO(1, "local developer node ready");
     char *request = malloc(NODE_MAX_LINE);
     char *response = malloc(NODE_MAX_LINE);
     if (request == NULL || response == NULL) {
@@ -428,8 +450,20 @@ static int run_node(const char *directory)
         (void)unlink(socket_path);
         goto fail;
     }
+    if (p2p_config->listen_enabled || p2p_config->peer_enabled) {
+        status = eclipse_p2p_start(p2p_config, node.chain, node.pool,
+                                   &node.state_lock, &node.stopping, &node.p2p);
+        if (status != ECLIPSE_SUCCESS) {
+            ECLIPSE_LOG_ERROR("P2P startup failed: %d", status);
+            free(request); free(response);
+            close(listener);
+            (void)unlink(socket_path);
+            goto fail;
+        }
+    }
+    ECLIPSE_LOG_INFO(1, "local developer node ready");
     bool loop_failed = false;
-    while (!interrupted && !node.stopping) {
+    while (!interrupted && !atomic_load(&node.stopping)) {
         struct pollfd watch = {.fd = listener, .events = POLLIN};
         int ready = poll(&watch, 1, 1000);
         if (ready < 0 && errno == EINTR) continue;
@@ -458,15 +492,21 @@ static int run_node(const char *directory)
     }
     free(request);
     free(response);
+    atomic_store(&node.stopping, true);
+    eclipse_p2p_stop(node.p2p);
     close(listener);
     (void)unlink(socket_path);
     eclipse_mempool_free(node.pool);
     eclipse_chain_free(node.chain);
+    (void)pthread_mutex_destroy(&node.state_lock);
     if (!loop_failed) ECLIPSE_LOG_INFO(1, "local developer node stopped cleanly");
     return loop_failed ? EXIT_FAILURE : EXIT_SUCCESS;
 fail:
+    atomic_store(&node.stopping, true);
+    eclipse_p2p_stop(node.p2p);
     eclipse_mempool_free(node.pool);
     eclipse_chain_free(node.chain);
+    (void)pthread_mutex_destroy(&node.state_lock);
     return EXIT_FAILURE;
 }
 
@@ -520,16 +560,50 @@ static int run_client(const char *directory, int count, char **words)
 
 int main(int argc, char **argv)
 {
-    if (argc >= 3 && strcmp(argv[1], "run") == 0 &&
-        (argc == 3 || (argc == 5 && strcmp(argv[3], "--log-level") == 0))) {
-        if (argc == 5) {
-            uint32_t level = 0;
-            if (!parse_u32(argv[4], &level) || level > 5 ||
-                eclipse_log_set_info_level(level) != ECLIPSE_SUCCESS) {
-                print_usage(); return EXIT_FAILURE;
+    if (argc >= 3 && strcmp(argv[1], "run") == 0) {
+        eclipse_p2p_config_t config = {0};
+        for (int i = 3; i < argc;) {
+            uint32_t number = 0;
+            if (strcmp(argv[i], "--log-level") == 0 && i + 1 < argc &&
+                parse_u32(argv[i + 1], &number) && number <= 5 &&
+                eclipse_log_set_info_level(number) == ECLIPSE_SUCCESS) {
+                i += 2;
+                continue;
             }
+            if (i + 2 < argc && parse_u32(argv[i + 2], &number) &&
+                number <= UINT16_MAX) {
+                if (strcmp(argv[i], "--p2p-listen") == 0 &&
+                    strlen(argv[i + 1]) < sizeof(config.listen_host) &&
+                    argv[i + 1][0] != '\0') {
+                    config.listen_enabled = true;
+                    memcpy(config.listen_host, argv[i + 1], strlen(argv[i + 1]) + 1);
+                    config.listen_port = (uint16_t)number;
+                    i += 3;
+                    continue;
+                }
+                if (number != 0 && strcmp(argv[i], "--peer") == 0 &&
+                    strlen(argv[i + 1]) < sizeof(config.peer_host) &&
+                    argv[i + 1][0] != '\0') {
+                    config.peer_enabled = true;
+                    memcpy(config.peer_host, argv[i + 1], strlen(argv[i + 1]) + 1);
+                    config.peer_port = (uint16_t)number;
+                    i += 3;
+                    continue;
+                }
+                if (number != 0 && strcmp(argv[i], "--tor-socks") == 0 &&
+                    strlen(argv[i + 1]) < sizeof(config.socks_host) &&
+                    argv[i + 1][0] != '\0') {
+                    config.socks_enabled = true;
+                    memcpy(config.socks_host, argv[i + 1], strlen(argv[i + 1]) + 1);
+                    config.socks_port = (uint16_t)number;
+                    i += 3;
+                    continue;
+                }
+            }
+            print_usage();
+            return EXIT_FAILURE;
         }
-        return run_node(argv[2]);
+        return run_node(argv[2], &config);
     }
     if (argc >= 4 && strcmp(argv[1], "ctl") == 0)
         return run_client(argv[2], argc - 3, argv + 3);

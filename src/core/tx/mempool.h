@@ -19,6 +19,10 @@ eclipse_error_t eclipse_mempool_create(const eclipse_chain_t *chain,
                                       eclipse_mempool_t **out);
 void eclipse_mempool_free(eclipse_mempool_t *pool);
 size_t eclipse_mempool_count(const eclipse_mempool_t *pool);
+/* Copies one currently pending signed transaction for local peer relay.
+ * The caller must still respect its own synchronization around the pool. */
+eclipse_error_t eclipse_mempool_transaction(const eclipse_mempool_t *pool,
+                                            size_t index, eclipse_tx_t *out);
 
 /* Refresh after a canonical-tip change. Confirmed/conflicting entries are
  * removed; valid transactions from disconnected blocks are reconsidered. */

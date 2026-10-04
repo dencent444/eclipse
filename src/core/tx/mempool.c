@@ -80,6 +80,15 @@ size_t eclipse_mempool_count(const eclipse_mempool_t *pool)
     return pool == NULL ? 0 : pool->count;
 }
 
+eclipse_error_t eclipse_mempool_transaction(const eclipse_mempool_t *pool,
+                                            size_t index, eclipse_tx_t *out)
+{
+    if (pool == NULL || out == NULL) return ECLIPSE_ERROR_NULL_POINTER;
+    if (index >= pool->count) return ECLIPSE_ERROR_INVALID_ARGUMENT;
+    *out = *pool->entries[index].tx;
+    return ECLIPSE_SUCCESS;
+}
+
 /* Canonicalize before storing and apply only after capacity/allocations have
  * succeeded. Invalid or conflicting transactions leave pending_state intact. */
 static eclipse_error_t add_candidate(eclipse_mempool_t *pool,

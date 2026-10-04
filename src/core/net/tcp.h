@@ -1,6 +1,7 @@
 #ifndef ECLIPSE_NET_TCP_H
 #define ECLIPSE_NET_TCP_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -22,6 +23,9 @@ eclipse_error_t eclipse_tcp_listen(const char *host, uint16_t port, int backlog,
                                    eclipse_tcp_socket_t **out);
 eclipse_error_t eclipse_tcp_accept(const eclipse_tcp_socket_t *listener,
                                    eclipse_tcp_socket_t **out);
+/* Poll a listener without exposing its native descriptor to callers. */
+eclipse_error_t eclipse_tcp_wait_readable(const eclipse_tcp_socket_t *listener,
+                                         int timeout_ms, bool *ready);
 eclipse_error_t eclipse_tcp_local_port(const eclipse_tcp_socket_t *socket,
                                        uint16_t *port);
 /* Sets both send and receive timeouts; zero restores blocking behavior. */

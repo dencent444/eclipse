@@ -46,8 +46,8 @@ add_executable(eclipse-cli src/cli/main.c src/cli/pipeline.c src/cli/host_shell.
 target_include_directories(eclipse-cli PRIVATE ${CURSES_INCLUDE_DIRS})
 target_link_libraries(eclipse-cli PRIVATE eclipse_core ${CURSES_LIBRARIES})
 
-# A single-process local node. The Unix socket is a control interface, not P2P.
-add_executable(eclipse-node src/node/main.c)
+# Standalone node with separate Unix control and developer TCP P2P interfaces.
+add_executable(eclipse-node src/node/main.c src/node/p2p.c)
 target_link_libraries(eclipse-node PRIVATE eclipse_core)
 
 include(CTest)
@@ -113,6 +113,15 @@ if(BUILD_TESTING)
         target_link_libraries(node_tx_fixture PRIVATE eclipse_core)
         add_test(NAME node_integration_test COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/node_integration.py
+            $<TARGET_FILE:eclipse-node> $<TARGET_FILE:node_tx_fixture>)
+        add_test(NAME p2p_integration_test COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/p2p_integration.py
+            $<TARGET_FILE:eclipse-node> $<TARGET_FILE:node_tx_fixture>)
+        add_test(NAME p2p_socks_test COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/p2p_socks_test.py
+            $<TARGET_FILE:eclipse-node> $<TARGET_FILE:node_tx_fixture>)
+        add_test(NAME p2p_deep_fork_test COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/p2p_deep_fork_test.py
             $<TARGET_FILE:eclipse-node> $<TARGET_FILE:node_tx_fixture>)
     endif()
 endif()

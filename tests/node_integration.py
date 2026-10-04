@@ -57,6 +57,8 @@ with tempfile.TemporaryDirectory(prefix="eclipse-node-") as directory:
             start = ready(process)
             assert start["height"] == "0" and start["mempool"] == "0"
             assert control("mempool") == "OK count=0"
+            assert control("mine", "PUBLIC_BASE92", good=False) == (
+                "ERR invalid_public_key: expected an EWPK Base92 packet")
             assert control("submit-tx", "00", good=False) == "ERR rejected_transaction"
             assert control("submit-block", "00", good=False) == "ERR rejected_block"
 

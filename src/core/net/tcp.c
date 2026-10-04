@@ -190,6 +190,22 @@ eclipse_error_t eclipse_tcp_accept(const eclipse_tcp_socket_t *listener,
     return status;
 }
 
+eclipse_error_t eclipse_tcp_wait_readable(const eclipse_tcp_socket_t *listener,
+                                         int timeout_ms, bool *ready)
+{
+    if (listener == NULL || ready == NULL) return ECLIPSE_ERROR_NULL_POINTER;
+    *ready = false;
+    if (!listener->listening || timeout_ms < 0)
+        return ECLIPSE_ERROR_INVALID_ARGUMENT;
+    struct pollfd watch = {.fd = listener->fd, .events = POLLIN};
+    int result;
+    do { result = poll(&watch, 1, timeout_ms); } while (result < 0 && errno == EINTR);
+    if (result < 0 || (result > 0 && (watch.revents & (POLLERR | POLLHUP | POLLNVAL))))
+        return ECLIPSE_ERROR_IO;
+    *ready = result > 0 && (watch.revents & POLLIN) != 0;
+    return ECLIPSE_SUCCESS;
+}
+
 eclipse_error_t eclipse_tcp_local_port(const eclipse_tcp_socket_t *socket,
                                        uint16_t *port)
 {
