@@ -1,5 +1,6 @@
-#include "chain.h"
+#include "chain_internal.h"
 #include "miner.h"
+#include "chain_store.h"
 #include "../log.h"
 #include "../tx/utxo_internal.h"
 
@@ -15,6 +16,7 @@ typedef struct {
     eclipse_utxo_set_t *state;
     uint64_t height;
     uint64_t work;
+    size_t parent; /* SIZE_MAX means the virtual genesis anchor. */
 } chain_entry_t;
 
 struct eclipse_chain {
@@ -24,6 +26,7 @@ struct eclipse_chain {
     size_t count;
     size_t capacity;
     size_t tip; /* SIZE_MAX denotes the empty genesis anchor. */
+    eclipse_chain_store_t *store; /* NULL for a temporary in-memory chain. */
 };
 
 static eclipse_error_t hash_bytes(const uint8_t *bytes, size_t size,
@@ -100,9 +103,50 @@ eclipse_error_t eclipse_chain_create(eclipse_chain_t **out)
     return ECLIPSE_SUCCESS;
 }
 
+eclipse_error_t eclipse_chain_open(const char *path, eclipse_chain_t **out)
+{
+    if (path == NULL || out == NULL) return ECLIPSE_ERROR_NULL_POINTER;
+    *out = NULL;
+    eclipse_chain_t *chain = NULL;
+    eclipse_error_t status = eclipse_chain_create(&chain);
+    if (status != ECLIPSE_SUCCESS) return status;
+    eclipse_chain_store_t *store = NULL;
+    status = eclipse_chain_store_open(path, chain->genesis, &store);
+    if (status != ECLIPSE_SUCCESS) goto fail;
+    /* The store is attached only after replay, so validation cannot append
+     * records while reconstructing the chain from existing journal bytes. */
+    for (;;) {
+        eclipse_block_t *block = NULL;
+        bool end = false;
+        status = eclipse_chain_store_next(store, &block, &end);
+        if (status != ECLIPSE_SUCCESS || end) break;
+        bool became_tip = false;
+        status = eclipse_chain_accept(chain, block, &became_tip);
+        eclipse_block_free(block);
+        if (status != ECLIPSE_SUCCESS) {
+            if (status == ECLIPSE_ERROR_INVALID_ARGUMENT)
+                status = ECLIPSE_ERROR_IO;
+            ECLIPSE_LOG_WARNING("saved chain failed independent replay validation");
+            break;
+        }
+    }
+    if (status != ECLIPSE_SUCCESS) {
+        eclipse_chain_store_close(store);
+        goto fail;
+    }
+    chain->store = store;
+    *out = chain;
+    ECLIPSE_LOG_INFO(2, "saved dev chain replay completed");
+    return ECLIPSE_SUCCESS;
+fail:
+    eclipse_chain_free(chain);
+    return status;
+}
+
 void eclipse_chain_free(eclipse_chain_t *chain)
 {
     if (chain == NULL) return;
+    eclipse_chain_store_close(chain->store);
     for (size_t i = 0; i < chain->count; ++i) {
         eclipse_block_free(chain->entries[i].block);
         eclipse_utxo_set_free(chain->entries[i].state);
@@ -137,6 +181,24 @@ eclipse_error_t eclipse_chain_find_utxo(const eclipse_chain_t *chain,
     const eclipse_utxo_set_t *state = chain->tip == SIZE_MAX ?
         chain->genesis_state : chain->entries[chain->tip].state;
     return eclipse_utxo_set_find(state, txid, index, out, found);
+}
+
+eclipse_error_t eclipse_chain_clone_tip_state(const eclipse_chain_t *chain,
+                                              eclipse_utxo_set_t **out)
+{
+    if (chain == NULL || out == NULL) return ECLIPSE_ERROR_NULL_POINTER;
+    const eclipse_utxo_set_t *state = chain->tip == SIZE_MAX ?
+        chain->genesis_state : chain->entries[chain->tip].state;
+    return eclipse_utxo_set_clone(state, out);
+}
+
+bool eclipse_chain_is_canonical_block(const eclipse_chain_t *chain,
+                                      const uint8_t hash[32])
+{
+    if (chain == NULL || hash == NULL) return false;
+    for (size_t i = chain->tip; i != SIZE_MAX; i = chain->entries[i].parent)
+        if (memcmp(chain->entries[i].hash, hash, 32) == 0) return true;
+    return false;
 }
 
 static eclipse_error_t clone_block(const eclipse_block_t *source,
@@ -315,12 +377,23 @@ eclipse_error_t eclipse_chain_accept(eclipse_chain_t *chain,
         chain->entries = grown;
         chain->capacity = capacity;
     }
+    /* Commit the validated packet before publishing it as an accepted block.
+     * A failed append leaves the tip and all branch states unchanged. */
+    if (chain->store != NULL) {
+        status = eclipse_chain_store_append(chain->store, owned);
+        if (status != ECLIPSE_SUCCESS) {
+            eclipse_block_free(owned);
+            goto fail_state;
+        }
+    }
     size_t slot = chain->count++;
     chain_entry_t *entry = &chain->entries[slot];
     memcpy(entry->hash, hash, 32);
     entry->height = height + 1;
     entry->work = parent_work +
                   (UINT64_C(1) << ECLIPSE_BLOCK_DEV_DIFFICULTY_BITS);
+    entry->parent = memcmp(header.prev_block_hash, chain->genesis, 32) == 0 ?
+                    SIZE_MAX : find_index(chain, header.prev_block_hash);
     entry->state = working;
     entry->block = owned;
     /* Fixed dev difficulty makes work proportional to height today. Keep the

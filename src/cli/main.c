@@ -13,6 +13,7 @@
 #include "platform.h"
 #include "tx/tx.h"
 #include "tx/utxo.h"
+#include "tx/mempool.h"
 #include "wallet/wallet.h"
 #include "wallet/keypair.h"
 #include "pipeline.h"
@@ -28,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 enum { CLI_OK = 0, CLI_ERROR = 1, CLI_USAGE = 2 };
@@ -61,7 +63,9 @@ static void usage(FILE *stream)
           "  tx decode HEX|-                   Inspect one signed dev transaction\n"
           "  block demo                        Mine and emit one dev block as hex\n"
           "  block decode HEX|-                Inspect a canonical dev block\n"
-          "  chain demo                        Mine, transfer, and validate on two nodes\n"
+          "  chain demo                        Mine, pool, persist, and replay dev blocks\n"
+          "  chain mine JOURNAL PUBLIC_BASE92   Mine next reward to this public key\n"
+          "  chain status JOURNAL              Replay and inspect a saved dev chain\n"
           "  wallet create 44|65|87\n"
           "  wallet domain ROOT_BASE92 receive|spend\n"
           "  wallet public ROOT_BASE92 receive|spend master|INDEX\n"
@@ -79,6 +83,8 @@ static void usage(FILE *stream)
           "Hashes are exactly 32 bytes (64 hex digits), without a 0x prefix.\n"
           "The serialized header is exactly 88 bytes (176 hex digits).\n"
           "Use - in place of a single input value to read one line from stdin.\n"
+          "For chain mine, use a wallet spend-child public packet.\n"
+          "chain status validates the journal and trims an incomplete final record.\n"
           "In the developer shell, // pipes stdout into the next stage.\n"
           "A stage beginning with ! runs an external program (no shell expansion).\n"
           "Wallet create/domain output unencrypted secrets; protect stdout.\n"
@@ -1189,16 +1195,24 @@ static int block_command(int count, char **args)
  * both blocks on two fresh nodes. This is deliberately all local process state. */
 static int chain_demo(void)
 {
+    char journal_path[] = "/tmp/eclipse-chain-demo-XXXXXX";
+    int journal_fd = mkstemp(journal_path);
+    if (journal_fd < 0) {
+        ECLIPSE_LOG_ERROR("CLI cannot create a temporary chain journal");
+        return CLI_ERROR;
+    }
+    (void)close(journal_fd);
     eclipse_chain_t *first = NULL, *second = NULL;
+    eclipse_mempool_t *pool = NULL;
     eclipse_ml_dsa_key_t *miner = NULL, *receiver = NULL;
     eclipse_block_t *one = NULL, *two = NULL;
-    eclipse_error_t status = eclipse_chain_create(&first);
+    eclipse_error_t status = eclipse_chain_open(journal_path, &first);
     if (status == ECLIPSE_SUCCESS) status = eclipse_chain_create(&second);
     if (status == ECLIPSE_SUCCESS)
         status = eclipse_ml_dsa_generate(ECLIPSE_ML_DSA_44, &miner);
     if (status == ECLIPSE_SUCCESS)
         status = eclipse_ml_dsa_generate(ECLIPSE_ML_DSA_44, &receiver);
-    uint8_t genesis[32], one_hash[32], reward_id[32], txid[32];
+    uint8_t genesis[32], reward_id[32], txid[32];
     uint64_t height = 0;
     if (status == ECLIPSE_SUCCESS)
         status = eclipse_chain_tip(first, genesis, &height);
@@ -1221,9 +1235,9 @@ static int chain_demo(void)
     if (status == ECLIPSE_SUCCESS)
         status = eclipse_chain_accept(second, one, &selected);
     if (status == ECLIPSE_SUCCESS)
-        status = eclipse_block_hash(one, one_hash);
-    if (status == ECLIPSE_SUCCESS)
         status = eclipse_block_reward_id(one, reward_id);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_mempool_create(first, &pool);
     eclipse_tx_t *tx = NULL;
     if (status == ECLIPSE_SUCCESS) {
         tx = malloc(sizeof(*tx));
@@ -1242,10 +1256,14 @@ static int chain_demo(void)
                                        sizeof(receiver_public));
     if (status == ECLIPSE_SUCCESS) status = eclipse_tx_set_fee(tx, 1);
     if (status == ECLIPSE_SUCCESS) status = eclipse_tx_sign_input(tx, 0, miner);
-    const eclipse_tx_t *transactions[] = {tx};
+    bool admitted = false;
     if (status == ECLIPSE_SUCCESS)
-        status = eclipse_chain_make_candidate(first, one_hash, 2,
-                                               &destination, transactions, 1, &two);
+        status = eclipse_mempool_submit(pool, first, tx, &admitted);
+    if (status == ECLIPSE_SUCCESS && !admitted)
+        status = ECLIPSE_ERROR_INVALID_ARGUMENT;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_mempool_make_candidate(pool, first, 2,
+                                                 &destination, &two);
     found = false;
     if (status == ECLIPSE_SUCCESS)
         status = eclipse_miner_mine(two, 100000, &found);
@@ -1255,6 +1273,8 @@ static int chain_demo(void)
         status = eclipse_chain_accept(first, two, &selected);
     if (status == ECLIPSE_SUCCESS)
         status = eclipse_chain_accept(second, two, &selected);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_mempool_sync(pool, first);
     if (status == ECLIPSE_SUCCESS) status = eclipse_tx_id(tx, txid);
     uint8_t first_tip[32], second_tip[32];
     uint64_t second_height = 0;
@@ -1267,26 +1287,143 @@ static int chain_demo(void)
     if (status == ECLIPSE_SUCCESS)
         status = eclipse_chain_find_utxo(second, txid, 0, &received, &owned);
     if (status == ECLIPSE_SUCCESS && (!owned || height != 2 ||
-        second_height != height || memcmp(first_tip, second_tip, 32) != 0))
+        second_height != height || memcmp(first_tip, second_tip, 32) != 0 ||
+        eclipse_mempool_count(pool) != 0))
+        status = ECLIPSE_ERROR_INVALID_ARGUMENT;
+    /* Close and replay the journal through normal consensus validation. */
+    if (status == ECLIPSE_SUCCESS) {
+        eclipse_chain_free(first);
+        first = NULL;
+        status = eclipse_chain_open(journal_path, &first);
+    }
+    uint8_t replay_tip[32];
+    uint64_t replay_height = 0;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_tip(first, replay_tip, &replay_height);
+    if (status == ECLIPSE_SUCCESS && (replay_height != height ||
+        memcmp(replay_tip, first_tip, 32) != 0))
         status = ECLIPSE_ERROR_INVALID_ARGUMENT;
     if (status == ECLIPSE_SUCCESS) {
         char tip_hex[65];
         format_hex(first_tip, sizeof(first_tip), tip_hex);
         printf("height=%" PRIu64 "\ntip=%s\n"
-               "receiver_amount=%" PRIu64 "\nnodes_agree=true\n",
+               "receiver_amount=%" PRIu64 "\nnodes_agree=true\n"
+               "mempool_pending=0\ndisk_replay=true\n",
                height, tip_hex, received.amount);
-        ECLIPSE_LOG_INFO(1, "CLI mined and independently validated two dev blocks");
+        ECLIPSE_LOG_INFO(1, "CLI mined, pooled, persisted and replayed two dev blocks");
     }
     free(tx);
+    eclipse_mempool_free(pool);
     eclipse_block_free(two);
     eclipse_block_free(one);
     eclipse_ml_dsa_key_free(receiver);
     eclipse_ml_dsa_key_free(miner);
     eclipse_chain_free(second);
     eclipse_chain_free(first);
+    (void)unlink(journal_path);
     if (status != ECLIPSE_SUCCESS)
         ECLIPSE_LOG_ERROR("chain demo failed with code %d", status);
     return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
+}
+
+/* Mine a durable reward block to an explicit public key. The miner needs no
+ * private key; ownership remains with the wallet that supplied this packet. */
+static int chain_mine(const char *path, const char *public_argument)
+{
+    char piped[8192] = {0};
+    const char *public_text = resolve_input(public_argument, piped, sizeof(piped));
+    eclipse_wallet_public_key_t key = {0};
+    eclipse_error_t status = public_text == NULL ? ECLIPSE_ERROR_INVALID_ARGUMENT :
+        eclipse_wallet_public_from_base92(public_text, strlen(public_text), &key);
+    eclipse_chain_t *chain = NULL;
+    eclipse_block_t *parent_block = NULL, *candidate = NULL;
+    if (status == ECLIPSE_SUCCESS) status = eclipse_chain_open(path, &chain);
+    uint8_t parent_hash[32];
+    uint64_t height = 0, timestamp = 1;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_tip(chain, parent_hash, &height);
+    if (status == ECLIPSE_SUCCESS && height != 0) {
+        status = eclipse_chain_get_block(chain, parent_hash, &parent_block);
+        eclipse_block_header_t header;
+        if (status == ECLIPSE_SUCCESS)
+            status = eclipse_block_header(parent_block, &header);
+        if (status == ECLIPSE_SUCCESS && header.timestamp == UINT64_MAX)
+            status = ECLIPSE_ERROR_INVALID_ARGUMENT;
+        if (status == ECLIPSE_SUCCESS) timestamp = header.timestamp + 1;
+    }
+    eclipse_tx_output_t destination = {0};
+    destination.scheme = key.scheme;
+    destination.public_key_length = key.length;
+    if (key.length <= sizeof(destination.public_key))
+        memcpy(destination.public_key, key.bytes, key.length);
+    else status = ECLIPSE_ERROR_INVALID_ARGUMENT;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_make_candidate(chain, parent_hash, timestamp,
+                                               &destination, NULL, 0, &candidate);
+    bool found = false, became_tip = false;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_miner_mine(candidate, 100000, &found);
+    if (status == ECLIPSE_SUCCESS && !found)
+        status = ECLIPSE_ERROR_INVALID_ARGUMENT;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_accept(chain, candidate, &became_tip);
+    uint8_t tip[32], reward_id[32];
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_tip(chain, tip, &height);
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_block_reward_id(candidate, reward_id);
+    if (status == ECLIPSE_SUCCESS && !became_tip)
+        status = ECLIPSE_ERROR_INVALID_ARGUMENT;
+    if (status == ECLIPSE_SUCCESS) {
+        char tip_hex[65], reward_hex[65];
+        format_hex(tip, sizeof(tip), tip_hex);
+        format_hex(reward_id, sizeof(reward_id), reward_hex);
+        printf("height=%" PRIu64 "\ntip=%s\nreward_outpoint=%s:0\n",
+               height, tip_hex, reward_hex);
+        ECLIPSE_LOG_INFO(1, "CLI mined and saved a developer reward block");
+    }
+    eclipse_block_free(candidate);
+    eclipse_block_free(parent_block);
+    eclipse_chain_free(chain);
+    OPENSSL_cleanse(piped, sizeof(piped));
+    if (status != ECLIPSE_SUCCESS)
+        ECLIPSE_LOG_ERROR("chain mining failed with code %d", status);
+    return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
+}
+
+static int chain_status(const char *path)
+{
+    struct stat info;
+    if (stat(path, &info) != 0 || !S_ISREG(info.st_mode)) {
+        fputs("Expected an existing chain journal file.\n", stderr);
+        return CLI_USAGE;
+    }
+    eclipse_chain_t *chain = NULL;
+    eclipse_error_t status = eclipse_chain_open(path, &chain);
+    uint8_t tip[32];
+    uint64_t height = 0;
+    if (status == ECLIPSE_SUCCESS)
+        status = eclipse_chain_tip(chain, tip, &height);
+    if (status == ECLIPSE_SUCCESS) {
+        char tip_hex[65];
+        format_hex(tip, sizeof(tip), tip_hex);
+        printf("height=%" PRIu64 "\ntip=%s\n", height, tip_hex);
+        ECLIPSE_LOG_INFO(2, "saved developer chain replayed for CLI status");
+    }
+    eclipse_chain_free(chain);
+    return status == ECLIPSE_SUCCESS ? CLI_OK : CLI_ERROR;
+}
+
+static int chain_command(int count, char **args)
+{
+    if (count == 1 && strcmp(args[0], "demo") == 0) return chain_demo();
+    if (count == 3 && strcmp(args[0], "mine") == 0)
+        return chain_mine(args[1], args[2]);
+    if (count == 2 && strcmp(args[0], "status") == 0)
+        return chain_status(args[1]);
+    fputs("Use chain demo, chain mine JOURNAL PUBLIC_BASE92, or chain status JOURNAL.\n",
+          stderr);
+    return CLI_USAGE;
 }
 
 static int wallet_command(int count, char **args)
@@ -1503,9 +1640,8 @@ static int run_command(int count, char **args)
         return tx_command(count - 1, args + 1);
     if (strcmp(command, "block") == 0)
         return block_command(count - 1, args + 1);
-    if (strcmp(command, "chain") == 0 && count == 2 &&
-        strcmp(args[1], "demo") == 0)
-        return chain_demo();
+    if (strcmp(command, "chain") == 0)
+        return chain_command(count - 1, args + 1);
     if (strcmp(command, "wallet") == 0)
         return wallet_command(count - 1, args + 1);
     if (strcmp(command, "shell") == 0 && count == 1)

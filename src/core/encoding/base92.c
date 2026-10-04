@@ -111,10 +111,16 @@ eclipse_error_t eclipse_base92_decode(const char *text, size_t text_length,
         return ECLIPSE_ERROR_INVALID_ARGUMENT;
     }
 
-    /* Decode into a temporary buffer so malformed input cannot leave a
-       half-written output. The upper bound is deliberately conservative. */
-    size_t max_bytes = (text_length * 13) / 16 + 2;
-    uint8_t *decoded = OPENSSL_malloc(max_bytes);
+    /* Every pair contributes 13 bits; an odd final symbol contributes six.
+     * Check the caller's actual output capacity before allocating scratch
+     * memory proportional to untrusted text length. */
+    size_t decoded_length = ((text_length / 2) * 13 +
+                             ((text_length & 1u) != 0 ? 6u : 0u)) / 8;
+    if (decoded_length > capacity) {
+        ECLIPSE_LOG_INFO(4, "Base92 decode output capacity is too small");
+        return ECLIPSE_ERROR_BUFFER_TOO_SMALL;
+    }
+    uint8_t *decoded = OPENSSL_malloc(decoded_length);
     if (decoded == NULL) return ECLIPSE_ERROR_OUT_OF_MEMORY;
     uint32_t bits = 0;
     unsigned bit_count = 0;
@@ -173,6 +179,6 @@ eclipse_error_t eclipse_base92_decode(const char *text, size_t text_length,
     } else {
         ECLIPSE_LOG_INFO(4, "Base92 value rejected");
     }
-    OPENSSL_clear_free(decoded, max_bytes);
+    OPENSSL_clear_free(decoded, decoded_length);
     return status;
 }

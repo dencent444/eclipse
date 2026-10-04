@@ -90,7 +90,7 @@ execute_process(
     COMMAND "${CLI}" --log-level 0 chain demo
     RESULT_VARIABLE RESULT OUTPUT_VARIABLE OUTPUT ERROR_VARIABLE ERROR)
 if(NOT RESULT EQUAL 0 OR
-   NOT OUTPUT MATCHES "height=2\ntip=00[0-9a-f]+\nreceiver_amount=4999999999\nnodes_agree=true")
+   NOT OUTPUT MATCHES "height=2\ntip=00[0-9a-f]+\nreceiver_amount=4999999999\nnodes_agree=true\nmempool_pending=0\ndisk_replay=true")
     message(FATAL_ERROR "developer chain CLI demo failed: ${RESULT}\n${OUTPUT}\n${ERROR}")
 endif()
 
@@ -208,6 +208,38 @@ execute_process(
 if(NOT RESULT EQUAL 0 OR NOT OUTPUT MATCHES "scheme=44\nlength=1312\npublic_key=[0-9a-f]+\n")
     message(FATAL_ERROR "wallet public packet decode failed: ${RESULT}\n${OUTPUT}\n${ERROR}")
 endif()
+
+# A wallet-owned spend key can receive two mined rewards in one persistent
+# journal, which the CLI replays in a fresh process for each command.
+execute_process(
+    COMMAND "${CLI}" wallet public "${ROOT}" spend 0
+    RESULT_VARIABLE RESULT OUTPUT_VARIABLE SPEND_PUBLIC_PACKET
+    ERROR_VARIABLE ERROR OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT RESULT EQUAL 0 OR SPEND_PUBLIC_PACKET STREQUAL "")
+    message(FATAL_ERROR "spend-domain public packet failed: ${RESULT}\n${ERROR}")
+endif()
+set(CHAIN_JOURNAL "${TEST_BINARY_DIR}/cli-chain-journal.bin")
+file(REMOVE "${CHAIN_JOURNAL}")
+execute_process(
+    COMMAND "${CLI}" --log-level 0 chain mine "${CHAIN_JOURNAL}" "${SPEND_PUBLIC_PACKET}"
+    RESULT_VARIABLE RESULT OUTPUT_VARIABLE OUTPUT ERROR_VARIABLE ERROR)
+if(NOT RESULT EQUAL 0 OR
+   NOT OUTPUT MATCHES "height=1\ntip=00[0-9a-f]+\nreward_outpoint=[0-9a-f]+:0")
+    message(FATAL_ERROR "first persistent CLI block failed: ${RESULT}\n${OUTPUT}\n${ERROR}")
+endif()
+execute_process(
+    COMMAND "${CLI}" --log-level 0 chain mine "${CHAIN_JOURNAL}" "${SPEND_PUBLIC_PACKET}"
+    RESULT_VARIABLE RESULT OUTPUT_VARIABLE OUTPUT ERROR_VARIABLE ERROR)
+if(NOT RESULT EQUAL 0 OR NOT OUTPUT MATCHES "height=2\ntip=00[0-9a-f]+")
+    message(FATAL_ERROR "second persistent CLI block failed: ${RESULT}\n${OUTPUT}\n${ERROR}")
+endif()
+execute_process(
+    COMMAND "${CLI}" --log-level 0 chain status "${CHAIN_JOURNAL}"
+    RESULT_VARIABLE RESULT OUTPUT_VARIABLE OUTPUT ERROR_VARIABLE ERROR)
+if(NOT RESULT EQUAL 0 OR NOT OUTPUT MATCHES "height=2\ntip=00[0-9a-f]+")
+    message(FATAL_ERROR "persistent chain replay CLI failed: ${RESULT}\n${OUTPUT}\n${ERROR}")
+endif()
+file(REMOVE "${CHAIN_JOURNAL}")
 execute_process(
     COMMAND "${CLI}" wallet verify "${ROOT}" receive 0
     RESULT_VARIABLE RESULT OUTPUT_VARIABLE OUTPUT ERROR_VARIABLE ERROR

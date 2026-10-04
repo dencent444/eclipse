@@ -8,8 +8,9 @@ commitment or transaction encoding requires a new version and test vectors.
 
 The empty genesis is the fixed SHA3-256 digest of ASCII
 `ECLIPSE/DEV/GENESIS/V1`. It has height zero and **zero spendable supply**.
-Height one is the first mined block. This is still an in-memory developer
-protocol, not a public mainnet or a networked full node.
+Height one is the first mined block. The chain can run in memory or replay
+an append-only local journal. This is not a public mainnet or a networked
+full node.
 
 A block has at most eight signed `ETX0` transactions. Its exact wire form is:
 
@@ -63,19 +64,52 @@ changing the canonical tip changes the visible state without editing a shared
 state in place.
 
 The implementation retains validated side branches and per-block UTXO
-snapshots in memory. It does not yet persist the chain, adjust difficulty,
-accept untrusted peers, synchronize over P2P, maintain a mempool, or enforce
-wall-clock future-time limits. A block decoder checks the packet and root;
-only chain acceptance checks parent, PoW, reward, signatures, and UTXO rules.
-Fixed 8-bit work is intentionally cheap for local experiments.
+snapshots in memory. Each snapshot keeps only live outputs in a dense array
+with a locally seeded hash lookup index; spent outputs are removed when a
+transaction applies. Snapshot cloning still copies every live output for
+each accepted block, so long chains and many side branches can consume large
+amounts of RAM. The optional disk journal retains every accepted block,
+including side branches, and replays them through the same validator on open.
+It does not yet adjust difficulty, accept untrusted peers, synchronize over
+P2P, or enforce wall-clock future-time limits. A block decoder checks the
+packet and root; only chain acceptance checks parent, PoW, reward, signatures,
+and UTXO rules. Fixed 8-bit work is intentionally cheap for local experiments.
+
+## Local chain journal and mempool
+
+`eclipse_chain_open(path)` creates or opens an exclusive-writer local journal.
+The file starts with ASCII `ECS1` followed by the 32-byte dev genesis hash.
+Each record is `block_length_u32be || canonical_block_wire ||
+SHA3-256(canonical_block_wire)`. The journal checksum detects damaged bytes;
+it is **not** a substitute for consensus checks. Loading decodes and validates
+every complete block, including parent, PoW, reward, transaction signatures,
+and UTXO transitions. A truncated final record is discarded and the file is
+truncated to the last complete record. A complete record with an invalid
+checksum or block makes opening fail. Appending a validated block is flushed
+with `fsync` before it becomes visible in memory. There is no snapshot,
+compaction, or concurrent-write support yet. Files contain public transparent
+chain data, never wallet private keys. A locally replaced *valid* journal
+cannot be detected without comparing to independent peers or checkpoints.
+
+The in-memory mempool is **local policy, not consensus**. It accepts only
+transactions valid against the canonical UTXOs plus earlier pending
+transactions, so unconfirmed parent/child transfers can be queued in order.
+It rejects duplicates, conflicting inputs, bad signatures and malformed
+packets. Current limits are 64 pending transactions and 1 MiB of combined
+wire bytes; block candidates take the first eight. On a canonical-tip change,
+it rebuilds against the new state, removes confirmed/conflicting transfers,
+and reconsiders transactions from disconnected blocks in block order.
+Pending transactions are not stored in the chain journal and are lost on
+process exit. There is no fee prioritization, replacement-by-fee, expiry,
+peer relay, or mempool persistence yet.
 
 ## Transparent transaction (developer v0)
 
 This first transaction format is deliberately transparent and independent of
 the private `eclipse-particle` experiment below. It transfers existing UTXOs;
 it does not create money. `eclipse_utxo_set_seed_dev` inserts local test funds
-until coinbase rewards and validated blocks exist. Calling that function is
-not a consensus minting rule.
+for standalone UTXO tests. It is never used to initialize a chain and is not
+a consensus minting rule.
 
 All integers below are unsigned big-endian. No C struct padding or native
 endianness is serialized. A signed transaction is exactly:
@@ -120,8 +154,9 @@ in `uint64_t`, and `sum(inputs) == sum(outputs) + fee`. Applying a transaction
 first validates and reserves memory, then marks inputs spent and inserts
 outputs under `(transaction ID, output index)`. The standalone in-memory set
 has no disk persistence or concurrent access. The chain applies ordered
-transfers on parent snapshots and adds block rewards, but has no mempool or
-disk state. `eclipse-cli tx decode` only checks the format because it has no
+transfers on parent snapshots and adds block rewards; its optional journal
+stores blocks and reconstructs this state on replay. `eclipse-cli tx decode`
+only checks the format because it has no
 independently validated UTXO set.
 
 The wallet helper signs with a child of the **spend** domain. An output must

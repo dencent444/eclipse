@@ -11,12 +11,14 @@ typedef struct eclipse_utxo_set eclipse_utxo_set_t;
 
 eclipse_error_t eclipse_utxo_set_create(eclipse_utxo_set_t **out);
 void eclipse_utxo_set_free(eclipse_utxo_set_t *set);
+/* Number of currently spendable outputs; spent entries are discarded. */
+size_t eclipse_utxo_set_count(const eclipse_utxo_set_t *set);
 /* Snapshot for validating a candidate branch without modifying its parent. */
 eclipse_error_t eclipse_utxo_set_clone(const eclipse_utxo_set_t *source,
                                       eclipse_utxo_set_t **out);
 
-/* DEV ONLY: seed an independent local test state before a coinbase/emission
- * rule exists. This is not a transaction, mining reward, or network API. */
+/* DEV ONLY: seed an independent local UTXO test fixture. The chain never calls
+ * this function, and it is not a transaction, mining reward, or network API. */
 eclipse_error_t eclipse_utxo_set_seed_dev(eclipse_utxo_set_t *set,
     const uint8_t txid[ECLIPSE_TX_ID_SIZE], uint32_t index,
     const eclipse_tx_output_t *output);

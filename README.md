@@ -4,7 +4,8 @@ The repository currently contains a block-header serialization exercise,
 ML-DSA wrappers, an in-memory wallet key skeleton, an eclipse-particle
 commitment prototype, a transparent developer transaction with an in-memory
 UTXO set, an in-memory developer PoW chain with miner rewards and competing
-branches, and transport wrappers. The chain is not a networked full node yet.
+branches, a local chain journal, a volatile mempool, and transport wrappers.
+The chain is not a networked full node yet.
 
 ## Build and test
 
@@ -73,6 +74,8 @@ HEX=$(./build/eclipse-cli --log-level 0 serialize 1 2 3 4 "$HASH" "$HASH")
 ./build/eclipse-cli 'tx demo // tx decode -'
 ./build/eclipse-cli 'block demo // block decode -'
 ./build/eclipse-cli chain demo
+./build/eclipse-cli chain mine ./dev-chain.dat PUBLIC_BASE92
+./build/eclipse-cli chain status ./dev-chain.dat
 ./build/eclipse-cli 'serialize(1,2,3,4,0000000000000000000000000000000000000000000000000000000000000000,0000000000000000000000000000000000000000000000000000000000000000) // deserialize // !grep version'
 ./build/eclipse-cli shell
 ./build/eclipse-cli shell-info
@@ -136,12 +139,23 @@ public key for validation to accept its later spend.
 `block demo` mines one reward block and emits its canonical wire packet as
 hex. `block decode` checks the packet and Merkle root, reports whether its
 hash meets the included PoW target, and labels state validity unknown because
-it has no parent UTXO state. `chain demo` mines two blocks, spends the first
-reward in a signed transaction, and checks that two independent local chains
-agree on the resulting tip and received output. The chain API also validates
-side branches and reorganizes its canonical UTXO view. Exact dev rules are in
-[`protocol.md`](protocol.md). Persistence, dynamic difficulty, mempool,
-P2P synchronization, and private transactions remain to be implemented.
+it has no parent UTXO state. `chain demo` mines two blocks, admits a signed
+spend into the mempool, saves both blocks to a temporary journal, and replays
+it after closing the chain. It checks that two independent local chains agree
+on the resulting tip and received output. The chain API also validates side
+branches and reorganizes its canonical UTXO view. The mempool rechecks pending
+transactions after a tip change and restores valid transactions from
+disconnected blocks. Exact dev rules and the journal format are in
+[`protocol.md`](protocol.md). The CLI demo removes its temporary journal
+after replay; applications can use `eclipse_chain_open(path)` to retain one.
+`chain mine JOURNAL PUBLIC_BASE92` keeps its blocks in the named journal and
+pays the reward to the supplied wallet **spend-child public packet**. The
+reward outpoint is printed for later transaction construction. `chain status`
+replays that journal and reports the validated tip; it also truncates an
+incomplete final record if one was left by a crash. These commands use
+synthetic sequential timestamps for the local dev chain.
+Dynamic difficulty, P2P synchronization, and private transactions remain to
+be implemented.
 
 ## ML-DSA module
 

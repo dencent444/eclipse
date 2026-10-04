@@ -14,6 +14,9 @@
 
 typedef struct eclipse_chain eclipse_chain_t;
 eclipse_error_t eclipse_chain_create(eclipse_chain_t **out);
+/* Open/create an append-only journal and replay every complete block through
+ * normal validation. A partial final record is truncated after a crash. */
+eclipse_error_t eclipse_chain_open(const char *path, eclipse_chain_t **out);
 void eclipse_chain_free(eclipse_chain_t *chain);
 uint64_t eclipse_chain_subsidy(uint64_t height);
 eclipse_error_t eclipse_chain_genesis_hash(uint8_t out[32]);

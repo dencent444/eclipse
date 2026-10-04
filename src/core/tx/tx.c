@@ -26,6 +26,8 @@ _Static_assert(ECLIPSE_TX_MAX_SIGNING_SIZE ==
                ECLIPSE_TX_MAX_OUTPUTS *
                (TX_OUTPUT_BASE_SIZE + ECLIPSE_TX_MAX_PUBLIC_KEY_SIZE) + 1u,
                "signing buffer must cover the largest unsigned transaction");
+_Static_assert(ECLIPSE_TX_MAX_INPUTS <= UINT8_MAX,
+               "one-byte signing input index requires at most 255 inputs");
 
 /* Explicit big-endian helpers keep C structure padding and host byte order
  * out of signed bytes. They only run after the destination size was checked. */

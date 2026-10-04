@@ -1,6 +1,7 @@
 #include "utxo_internal.h"
 #include "../log.h"
 
+#include <openssl/rand.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -8,28 +9,145 @@ typedef struct {
     uint8_t txid[ECLIPSE_TX_ID_SIZE];
     uint32_t index;
     eclipse_tx_output_t output;
-    bool spent;
 } utxo_entry_t;
 
 struct eclipse_utxo_set {
     utxo_entry_t *entries;
     size_t count;
     size_t capacity;
+    /* Open addressing: zero is empty, SIZE_MAX is a deletion marker, and
+     * every other slot stores a dense entry index plus one. */
+    size_t *slots;
+    size_t slot_capacity;
+    size_t tombstones;
+    uint64_t hash_seed;
 };
+
+static uint64_t outpoint_hash(const eclipse_utxo_set_t *set,
+                              const uint8_t txid[ECLIPSE_TX_ID_SIZE],
+                              uint32_t index)
+{
+    /* txids are SHA3 digests. A local random seed makes deliberate table
+     * collision grinding harder without affecting consensus-visible state. */
+    uint64_t hash = set->hash_seed ^ UINT64_C(14695981039346656037);
+    for (size_t i = 0; i < ECLIPSE_TX_ID_SIZE; ++i) {
+        hash ^= txid[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    for (unsigned i = 0; i < 4; ++i) {
+        hash ^= (uint8_t)(index >> (i * 8));
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static size_t find_slot(const eclipse_utxo_set_t *set,
+                        const uint8_t txid[ECLIPSE_TX_ID_SIZE], uint32_t index)
+{
+    if (set->slot_capacity == 0) return SIZE_MAX;
+    size_t mask = set->slot_capacity - 1;
+    size_t slot = (size_t)outpoint_hash(set, txid, index) & mask;
+    for (size_t probes = 0; probes < set->slot_capacity; ++probes) {
+        size_t value = set->slots[slot];
+        if (value == 0) return SIZE_MAX;
+        if (value != SIZE_MAX) {
+            const utxo_entry_t *entry = &set->entries[value - 1];
+            if (entry->index == index &&
+                memcmp(entry->txid, txid, ECLIPSE_TX_ID_SIZE) == 0)
+                return slot;
+        }
+        slot = (slot + 1) & mask;
+    }
+    return SIZE_MAX;
+}
 
 static utxo_entry_t *lookup(const eclipse_utxo_set_t *set,
                             const uint8_t txid[ECLIPSE_TX_ID_SIZE],
                             uint32_t index)
 {
-    for (size_t i = 0; i < set->count; ++i)
-        if (set->entries[i].index == index &&
-            memcmp(set->entries[i].txid, txid, ECLIPSE_TX_ID_SIZE) == 0)
-            return &set->entries[i];
-    return NULL;
+    size_t slot = find_slot(set, txid, index);
+    return slot == SIZE_MAX ? NULL : &set->entries[set->slots[slot] - 1];
 }
 
-/* Grow before changing any spent bit. That makes an allocation failure leave
- * the entire UTXO set in its original state. */
+/* Call after allocating entry capacity and before any transaction mutation.
+ * Rebuilding also clears deletion markers, preserving bounded probe length. */
+static eclipse_error_t reserve_slots(eclipse_utxo_set_t *set, size_t needed)
+{
+    if (needed > SIZE_MAX / 2) return ECLIPSE_ERROR_OUT_OF_MEMORY;
+    size_t capacity = set->slot_capacity == 0 ? 16 : set->slot_capacity;
+    while (capacity < needed * 2) {
+        if (capacity > SIZE_MAX / 2) return ECLIPSE_ERROR_OUT_OF_MEMORY;
+        capacity *= 2;
+    }
+    if (capacity == set->slot_capacity &&
+        set->tombstones <= capacity / 4) return ECLIPSE_SUCCESS;
+    if (capacity > SIZE_MAX / sizeof(*set->slots))
+        return ECLIPSE_ERROR_OUT_OF_MEMORY;
+    size_t *slots = calloc(capacity, sizeof(*slots));
+    if (slots == NULL) return ECLIPSE_ERROR_OUT_OF_MEMORY;
+    size_t mask = capacity - 1;
+    for (size_t i = 0; i < set->count; ++i) {
+        const utxo_entry_t *entry = &set->entries[i];
+        size_t slot = (size_t)outpoint_hash(set, entry->txid,
+                                            entry->index) & mask;
+        while (slots[slot] != 0) slot = (slot + 1) & mask;
+        slots[slot] = i + 1;
+    }
+    free(set->slots);
+    set->slots = slots;
+    set->slot_capacity = capacity;
+    set->tombstones = 0;
+    ECLIPSE_LOG_INFO(5, "UTXO lookup index rebuilt for %zu live outputs",
+                     set->count);
+    return ECLIPSE_SUCCESS;
+}
+
+/* Insertion is infallible after reserve_slots. Caller already validated the
+ * key, duplicate outpoint and entry capacity. */
+static void insert_unchecked(eclipse_utxo_set_t *set,
+    const uint8_t txid[ECLIPSE_TX_ID_SIZE], uint32_t index,
+    const eclipse_tx_output_t *output)
+{
+    size_t mask = set->slot_capacity - 1;
+    size_t slot = (size_t)outpoint_hash(set, txid, index) & mask;
+    size_t first_tombstone = SIZE_MAX;
+    while (set->slots[slot] != 0) {
+        if (set->slots[slot] == SIZE_MAX && first_tombstone == SIZE_MAX)
+            first_tombstone = slot;
+        slot = (slot + 1) & mask;
+    }
+    if (first_tombstone != SIZE_MAX) {
+        slot = first_tombstone;
+        --set->tombstones;
+    }
+    utxo_entry_t *entry = &set->entries[set->count];
+    memcpy(entry->txid, txid, ECLIPSE_TX_ID_SIZE);
+    entry->index = index;
+    entry->output = *output;
+    set->slots[slot] = ++set->count;
+}
+
+/* Remove an input and keep the live array dense. The moved final entry's
+ * bucket is updated before its old array position is forgotten. */
+static void remove_unchecked(eclipse_utxo_set_t *set,
+    const uint8_t txid[ECLIPSE_TX_ID_SIZE], uint32_t index)
+{
+    size_t slot = find_slot(set, txid, index);
+    size_t removed = set->slots[slot] - 1;
+    set->slots[slot] = SIZE_MAX;
+    ++set->tombstones;
+    size_t last = set->count - 1;
+    if (removed != last) {
+        utxo_entry_t moved = set->entries[last];
+        size_t moved_slot = find_slot(set, moved.txid, moved.index);
+        set->entries[removed] = moved;
+        set->slots[moved_slot] = removed + 1;
+    }
+    --set->count;
+}
+
+/* Grow before changing any live output. Allocation failure leaves the set's
+ * externally visible contents in their original state. */
 static eclipse_error_t reserve(eclipse_utxo_set_t *set, size_t needed)
 {
     if (needed <= set->capacity) return ECLIPSE_SUCCESS;
@@ -65,6 +183,13 @@ eclipse_error_t eclipse_utxo_set_create(eclipse_utxo_set_t **out)
         ECLIPSE_LOG_ERROR("UTXO set allocation failed");
         return ECLIPSE_ERROR_OUT_OF_MEMORY;
     }
+    if (RAND_bytes((uint8_t *)&(*out)->hash_seed,
+                   sizeof((*out)->hash_seed)) != 1) {
+        free(*out);
+        *out = NULL;
+        ECLIPSE_LOG_ERROR("UTXO lookup seed generation failed");
+        return ECLIPSE_ERROR_CRYPTO_FAILURE;
+    }
     ECLIPSE_LOG_INFO(3, "empty developer UTXO set created");
     return ECLIPSE_SUCCESS;
 }
@@ -72,9 +197,15 @@ eclipse_error_t eclipse_utxo_set_create(eclipse_utxo_set_t **out)
 void eclipse_utxo_set_free(eclipse_utxo_set_t *set)
 {
     if (set == NULL) return;
+    free(set->slots);
     free(set->entries);
     free(set);
     ECLIPSE_LOG_INFO(3, "developer UTXO set released");
+}
+
+size_t eclipse_utxo_set_count(const eclipse_utxo_set_t *set)
+{
+    return set == NULL ? 0 : set->count;
 }
 
 eclipse_error_t eclipse_utxo_set_clone(const eclipse_utxo_set_t *source,
@@ -85,6 +216,7 @@ eclipse_error_t eclipse_utxo_set_clone(const eclipse_utxo_set_t *source,
     eclipse_utxo_set_t *copy = NULL;
     eclipse_error_t status = eclipse_utxo_set_create(&copy);
     if (status != ECLIPSE_SUCCESS) return status;
+    copy->hash_seed = source->hash_seed;
     status = reserve(copy, source->count);
     if (status != ECLIPSE_SUCCESS) {
         eclipse_utxo_set_free(copy);
@@ -94,6 +226,12 @@ eclipse_error_t eclipse_utxo_set_clone(const eclipse_utxo_set_t *source,
         memcpy(copy->entries, source->entries,
                source->count * sizeof(*copy->entries));
     copy->count = source->count;
+    /* Rebuild after copying: slot values refer to this dense entry array. */
+    status = reserve_slots(copy, copy->count);
+    if (status != ECLIPSE_SUCCESS) {
+        eclipse_utxo_set_free(copy);
+        return status;
+    }
     *out = copy;
     ECLIPSE_LOG_INFO(5, "UTXO branch snapshot cloned");
     return ECLIPSE_SUCCESS;
@@ -125,11 +263,9 @@ static eclipse_error_t insert_unspent(eclipse_utxo_set_t *set,
     if (set->count == SIZE_MAX) return ECLIPSE_ERROR_OUT_OF_MEMORY;
     status = reserve(set, set->count + 1);
     if (status != ECLIPSE_SUCCESS) return status;
-    utxo_entry_t *entry = &set->entries[set->count++];
-    memcpy(entry->txid, txid, ECLIPSE_TX_ID_SIZE);
-    entry->index = index;
-    entry->output = *output;
-    entry->spent = false;
+    status = reserve_slots(set, set->count + 1);
+    if (status != ECLIPSE_SUCCESS) return status;
+    insert_unchecked(set, txid, index, output);
     return ECLIPSE_SUCCESS;
 }
 
@@ -162,7 +298,7 @@ eclipse_error_t eclipse_utxo_set_find(const eclipse_utxo_set_t *set,
     }
     *found = false;
     utxo_entry_t *entry = lookup(set, txid, index);
-    if (entry != NULL && !entry->spent) {
+    if (entry != NULL) {
         *out = entry->output;
         *found = true;
     }
@@ -207,7 +343,7 @@ eclipse_error_t eclipse_tx_validate(const eclipse_tx_t *tx,
     for (size_t i = 0; i < tx->input_count; ++i) {
         const eclipse_tx_input_t *input = &tx->inputs[i];
         utxo_entry_t *entry = lookup(set, input->txid, input->index);
-        if (entry == NULL || entry->spent) {
+        if (entry == NULL) {
             ECLIPSE_LOG_INFO(4, "transaction rejected: input missing or spent");
             return ECLIPSE_SUCCESS;
         }
@@ -280,18 +416,15 @@ eclipse_error_t eclipse_tx_apply(const eclipse_tx_t *tx, eclipse_utxo_set_t *set
         return ECLIPSE_ERROR_OUT_OF_MEMORY;
     status = reserve(set, set->count + tx->output_count);
     if (status != ECLIPSE_SUCCESS) return status;
+    status = reserve_slots(set, set->count + tx->output_count);
+    if (status != ECLIPSE_SUCCESS) return status;
 
-    /* No failing operation remains after this point: apply all input spends
-       and output creations as one deterministic state transition. */
+    /* No failing operation remains: remove spent outputs and insert new ones
+     * as one deterministic state transition. Old spent entries are discarded. */
     for (size_t i = 0; i < tx->input_count; ++i)
-        lookup(set, tx->inputs[i].txid, tx->inputs[i].index)->spent = true;
-    for (size_t i = 0; i < tx->output_count; ++i) {
-        utxo_entry_t *entry = &set->entries[set->count++];
-        memcpy(entry->txid, id, sizeof(id));
-        entry->index = (uint32_t)i;
-        entry->output = tx->outputs[i];
-        entry->spent = false;
-    }
+        remove_unchecked(set, tx->inputs[i].txid, tx->inputs[i].index);
+    for (size_t i = 0; i < tx->output_count; ++i)
+        insert_unchecked(set, id, (uint32_t)i, &tx->outputs[i]);
     memcpy(txid_out, id, sizeof(id));
     ECLIPSE_LOG_INFO(2, "transaction applied to developer UTXO state");
     return ECLIPSE_SUCCESS;
