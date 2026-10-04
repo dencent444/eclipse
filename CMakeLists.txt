@@ -47,7 +47,7 @@ target_include_directories(eclipse-cli PRIVATE ${CURSES_INCLUDE_DIRS})
 target_link_libraries(eclipse-cli PRIVATE eclipse_core ${CURSES_LIBRARIES})
 
 # Standalone node with separate Unix control and developer TCP P2P interfaces.
-add_executable(eclipse-node src/node/main.c src/node/p2p.c)
+add_executable(eclipse-node src/node/main.c src/node/p2p.c src/node/tor_onion.c)
 target_link_libraries(eclipse-node PRIVATE eclipse_core)
 
 include(CTest)
@@ -123,5 +123,8 @@ if(BUILD_TESTING)
         add_test(NAME p2p_deep_fork_test COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/p2p_deep_fork_test.py
             $<TARGET_FILE:eclipse-node> $<TARGET_FILE:node_tx_fixture>)
+        add_test(NAME tor_onion_integration_test COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/tor_onion_integration.py
+            $<TARGET_FILE:eclipse-node>)
     endif()
 endif()

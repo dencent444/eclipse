@@ -3,6 +3,7 @@
 /* Local developer node. Its Unix socket is control-only; P2P uses a separate
  * TCP listener. All chain and pool access shares one mutex with P2P workers. */
 #include "p2p.h"
+#include "tor_onion.h"
 #include "block/chain.h"
 #include "block/miner.h"
 #include "log.h"
@@ -35,6 +36,8 @@ typedef struct {
     pthread_mutex_t state_lock;
     atomic_bool stopping;
     eclipse_p2p_t *p2p;
+    eclipse_tor_onion_t *onion;
+    uint16_t onion_virtual_port;
 } node_t;
 
 static volatile sig_atomic_t interrupted = 0;
@@ -51,6 +54,7 @@ static void print_usage(void)
           "  eclipse-node run DATA_DIR [--log-level 0..5]\n"
           "      [--p2p-listen HOST PORT] [--peer HOST PORT]\n"
           "      [--tor-socks HOST PORT]\n"
+          "      [--auto-onion CONTROL_PORT COOKIE_FILE VIRTUAL_PORT]\n"
           "  eclipse-node ctl DATA_DIR status|mempool|stop\n"
           "  eclipse-node ctl DATA_DIR mine PUBLIC_BASE92\n"
           "  eclipse-node ctl DATA_DIR submit-tx TX_HEX\n"
@@ -184,10 +188,14 @@ static bool handle_command_locked(node_t *node, char *request, char *response,
             goto internal;
         char hex[65];
         encode_hex(tip, sizeof(tip), hex);
+        char onion[80];
+        eclipse_tor_onion_status(node->onion, onion, sizeof(onion));
+        uint16_t onion_port = node->onion != NULL ? node->onion_virtual_port : 0;
         (void)snprintf(response, capacity, "OK height=%" PRIu64
-                       " tip=%s mempool=%zu p2p_port=%u\n", height, hex,
+                       " tip=%s mempool=%zu p2p_port=%u onion=%s onion_port=%u\n", height, hex,
                        eclipse_mempool_count(node->pool),
-                       (unsigned)eclipse_p2p_listen_port(node->p2p));
+                       (unsigned)eclipse_p2p_listen_port(node->p2p), onion,
+                       (unsigned)onion_port);
         ECLIPSE_LOG_INFO(3, "local node status read at height %" PRIu64, height);
         return true;
     }
@@ -389,7 +397,8 @@ static bool handle_command(node_t *node, char *request, char *response,
     return good;
 }
 
-static int run_node(const char *directory, const eclipse_p2p_config_t *p2p_config)
+static int run_node(const char *directory, const eclipse_p2p_config_t *p2p_config,
+                    const eclipse_tor_config_t *tor_config)
 {
     umask(077);
     if (!prepare_directory(directory)) {
@@ -461,6 +470,18 @@ static int run_node(const char *directory, const eclipse_p2p_config_t *p2p_confi
             goto fail;
         }
     }
+    if (tor_config->enabled) {
+        node.onion_virtual_port = tor_config->virtual_port;
+        status = eclipse_tor_onion_start(tor_config, directory,
+                    eclipse_p2p_listen_port(node.p2p), &node.stopping,
+                    &node.onion);
+        if (status != ECLIPSE_SUCCESS) {
+            free(request); free(response);
+            close(listener);
+            (void)unlink(socket_path);
+            goto fail;
+        }
+    }
     ECLIPSE_LOG_INFO(1, "local developer node ready");
     bool loop_failed = false;
     while (!interrupted && !atomic_load(&node.stopping)) {
@@ -493,6 +514,7 @@ static int run_node(const char *directory, const eclipse_p2p_config_t *p2p_confi
     free(request);
     free(response);
     atomic_store(&node.stopping, true);
+    eclipse_tor_onion_stop(node.onion);
     eclipse_p2p_stop(node.p2p);
     close(listener);
     (void)unlink(socket_path);
@@ -503,6 +525,7 @@ static int run_node(const char *directory, const eclipse_p2p_config_t *p2p_confi
     return loop_failed ? EXIT_FAILURE : EXIT_SUCCESS;
 fail:
     atomic_store(&node.stopping, true);
+    eclipse_tor_onion_stop(node.onion);
     eclipse_p2p_stop(node.p2p);
     eclipse_mempool_free(node.pool);
     eclipse_chain_free(node.chain);
@@ -562,8 +585,25 @@ int main(int argc, char **argv)
 {
     if (argc >= 3 && strcmp(argv[1], "run") == 0) {
         eclipse_p2p_config_t config = {0};
+        eclipse_tor_config_t tor_config = {0};
         for (int i = 3; i < argc;) {
             uint32_t number = 0;
+            uint32_t virtual_port = 0;
+            if (strcmp(argv[i], "--auto-onion") == 0 && i + 3 < argc &&
+                !tor_config.enabled && parse_u32(argv[i + 1], &number) &&
+                number > 0 && number <= UINT16_MAX &&
+                argv[i + 2][0] != '\0' &&
+                strlen(argv[i + 2]) < sizeof(tor_config.cookie_path) &&
+                parse_u32(argv[i + 3], &virtual_port) &&
+                virtual_port > 0 && virtual_port <= UINT16_MAX) {
+                tor_config.enabled = true;
+                tor_config.control_port = (uint16_t)number;
+                tor_config.virtual_port = (uint16_t)virtual_port;
+                memcpy(tor_config.cookie_path, argv[i + 2],
+                       strlen(argv[i + 2]) + 1);
+                i += 4;
+                continue;
+            }
             if (strcmp(argv[i], "--log-level") == 0 && i + 1 < argc &&
                 parse_u32(argv[i + 1], &number) && number <= 5 &&
                 eclipse_log_set_info_level(number) == ECLIPSE_SUCCESS) {
@@ -603,7 +643,20 @@ int main(int argc, char **argv)
             print_usage();
             return EXIT_FAILURE;
         }
-        return run_node(argv[2], &config);
+        if (tor_config.enabled) {
+            if (config.listen_enabled &&
+                strcmp(config.listen_host, "127.0.0.1") != 0) {
+                fputs("Auto onion requires P2P to listen on 127.0.0.1.\n", stderr);
+                return EXIT_FAILURE;
+            }
+            if (!config.listen_enabled) {
+                config.listen_enabled = true;
+                (void)snprintf(config.listen_host, sizeof(config.listen_host),
+                               "127.0.0.1");
+                config.listen_port = 0;
+            }
+        }
+        return run_node(argv[2], &config, &tor_config);
     }
     if (argc >= 4 && strcmp(argv[1], "ctl") == 0)
         return run_client(argv[2], argc - 3, argv + 3);

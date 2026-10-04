@@ -119,9 +119,15 @@ supplied. The Unix control socket is never shared with peers. `--peer HOST
 PORT` configures one static outbound peer; the node reconnects periodically.
 For onion peers, `--tor-socks HOST PORT` routes the connection through SOCKS5
 using domain-name mode, so the onion hostname is sent to Tor without local DNS
-resolution. Tor itself owns the onion service and forwards its virtual TCP
-port to the node's local P2P listener. No UDP or automatic onion creation is
-implemented.
+resolution. With `--auto-onion CONTROL_PORT COOKIE_FILE VIRTUAL_PORT`, the node
+binds its P2P listener to IPv4 loopback (or requires an existing loopback
+listener), authenticates to Tor's local ControlPort using SAFECOOKIE, and
+registers `ADD_ONION` for the virtual TCP port. It verifies Tor's server HMAC
+before sending its own authentication proof. Tor generates the v3 service key;
+the node writes it to mode-0600 `onion.key` in its mode-0700 data directory and
+reuses it after restarts. The control connection stays open while the service
+is active; a worker restores it after a Tor restart. `status` exposes only the
+public address and port. No UDP or automatic peer discovery is implemented.
 
 Each P2P frame is `ASCII("EPN1") || type_u8 || length_u32be || payload`.
 Payloads are capped at `ECLIPSE_BLOCK_MAX_WIRE_SIZE`; oversized frames are

@@ -108,25 +108,48 @@ shows `p2p_port`; passing port `0` asks the OS to select a free listening port.
 There is no peer discovery or peer database yet. The listener accepts one
 inbound sync session at a time.
 
-For an onion service, run Tor separately and map its virtual P2P port to the
-node's **P2P listener**, for example:
+For an automatically created onion service, run a local Tor instance with a
+loopback ControlPort and SAFECOOKIE authentication. For example, put the
+following in a Tor configuration file, replacing `YOUR_USER` with your login
+name, and start Tor with `tor -f PATH_TO_TORRC`:
 
 ```text
-HiddenServiceDir /var/lib/tor/eclipse-node/
-HiddenServicePort 19333 127.0.0.1:19333
+DataDirectory /home/YOUR_USER/.local/share/eclipse-tor
+ControlPort 127.0.0.1:9051
+CookieAuthentication 1
+CookieAuthFile /home/YOUR_USER/.local/share/eclipse-tor/control_auth_cookie
+SocksPort 127.0.0.1:9050
 ```
 
-Tor creates the onion hostname in that service directory; the node does not
-create or store Tor service keys. A connecting node can then use:
+Then start the node. It binds its P2P listener to `127.0.0.1` on a free local
+port and asks Tor to forward virtual TCP port `19333` to it:
+
+```sh
+./build/eclipse-node run ./node-a --auto-onion 9051 /home/YOUR_USER/.local/share/eclipse-tor/control_auth_cookie 19333
+./build/eclipse-node ctl ./node-a status
+```
+
+`status` prints `onion=...onion` and `onion_port=19333` after Tor registers the
+service; this does not by itself confirm that other Tor clients can reach it.
+Tor generates the v3
+service key; the node keeps it as mode-0600 `onion.key` under the node's
+mode-0700 data directory. This file determines the public onion address across
+node and Tor restarts. Keep it private. If Tor restarts, the node marks its
+onion service offline and restores it with the same key after Tor returns.
+If Tor is run as another user, make its SAFECOOKIE file readable by the node
+user through appropriate group permissions. An existing manual
+`HiddenServiceDir` configuration also remains usable.
+
+A connecting node can then use:
 
 ```sh
 ./build/eclipse-node run ./node-b --peer YOUR_ONION_HOST.onion 19333 --tor-socks 127.0.0.1 9050
 ```
 
 The `.onion` hostname goes to the SOCKS5 proxy as a domain name; the node
-does not resolve it with local DNS. Keep the private control socket out of Tor
-port mappings. See the [Tor onion-service setup guide](https://community.torproject.org/onion-services/setup/)
-for service configuration. UDP is not part of this P2P transport.
+does not resolve it with local DNS. Never map the ControlPort or the local
+control socket through the onion service. UDP is not part of this P2P
+transport.
 
 This remains a developer network: fixed eight-bit PoW, full UTXO snapshots
 per block, and limited peer resource controls make a public listener unsafe.
