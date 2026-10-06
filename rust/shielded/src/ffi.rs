@@ -17,6 +17,9 @@ pub struct ShieldedReceipt {
     pub public_input: u64,
     pub value_balance: i64,
     pub action_count: u8,
+    /// Verified Orchard v2 flag byte. Bit 0 controls real spends; bit 1
+    /// controls real outputs. Consensus must require bit 0 clear for rewards.
+    pub flags: u8,
     pub anchor: [u8; 32],
     pub nullifiers: [[u8; 32]; MAX_ACTIONS],
     pub commitments: [[u8; 32]; MAX_ACTIONS],
@@ -30,6 +33,7 @@ impl ShieldedReceipt {
             public_input: tx.public_input,
             value_balance: *tx.bundle.value_balance(),
             action_count: tx.bundle.actions().len() as u8,
+            flags: tx.bundle.flag_byte(),
             anchor: tx.bundle.anchor().to_bytes(),
             nullifiers: [[0; 32]; MAX_ACTIONS],
             commitments: [[0; 32]; MAX_ACTIONS],
@@ -97,6 +101,7 @@ mod tests {
         assert_eq!(valid, 0);
         assert_eq!(receipt.public_input, 42);
         assert_eq!(receipt.action_count, 2);
+        assert_eq!(receipt.flags, 0b10);
         let invalid =
             unsafe { eclipse_shielded_verify_esx1(std::ptr::null(), 1, 44, &mut receipt) };
         assert_eq!(invalid, -1);

@@ -33,6 +33,7 @@ int main(int argc, char **argv)
     assert(receipt.network_id == 44 && receipt.public_input == 5000);
     assert(receipt.fee == 0 && receipt.value_balance == -5000);
     assert(receipt.action_count == 2);
+    assert(receipt.flags == ECLIPSE_SHIELDED_FLAG_OUTPUTS_ENABLED);
     eclipse_shielded_receipt_t accepted = receipt;
     assert(eclipse_shielded_verify_wire(wire, (size_t)size, 45,
                                         &receipt) == ECLIPSE_ERROR_INVALID_ARGUMENT);

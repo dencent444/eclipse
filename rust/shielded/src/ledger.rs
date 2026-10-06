@@ -78,11 +78,13 @@ impl ShieldedState {
 
     /// Validates a complete block as one atomic state transition. `subsidy` is
     /// supplied by the PoW chain's emission rule, never from the shielded tx.
+    /// A zero subsidy plus zero fees has no reward transaction: issuing a
+    /// zero-valued note would add meaningless commitments and nullifiers.
     /// A failed proof, repeated nullifier, or incorrect reward changes nothing.
     pub fn apply_block(
         &mut self,
         subsidy: u64,
-        reward: &ShieldedTx,
+        reward: Option<&ShieldedTx>,
         transfers: &[ShieldedTx],
     ) -> Result<(), String> {
         let fees = transfers
@@ -90,12 +92,18 @@ impl ShieldedState {
             .try_fold(0u64, |sum, tx| sum.checked_add(tx.fee))
             .ok_or("fee overflow")?;
         let allowed_reward = subsidy.checked_add(fees).ok_or("reward overflow")?;
-        if reward.network_id != self.network_id
-            || reward.fee != 0
-            || reward.public_input != allowed_reward
-            || reward.bundle.flags().spends_enabled()
-        {
-            return Err("invalid shielded reward".into());
+        match (allowed_reward, reward) {
+            (0, None) => {}
+            (0, Some(_)) | (_, None) => return Err("invalid shielded reward".into()),
+            (value, Some(tx)) => {
+                if tx.network_id != self.network_id
+                    || tx.fee != 0
+                    || tx.public_input != value
+                    || tx.bundle.flags().spends_enabled()
+                {
+                    return Err("invalid shielded reward".into());
+                }
+            }
         }
         let mut next = self.clone();
         for tx in transfers {
@@ -107,7 +115,9 @@ impl ShieldedState {
             }
             next.apply_one(tx)?;
         }
-        next.apply_one(reward)?;
+        if let Some(reward) = reward {
+            next.apply_one(reward)?;
+        }
         next.total_issued = next
             .total_issued
             .checked_add(subsidy)
@@ -191,7 +201,7 @@ mod tests {
         assert_eq!(parsed.to_bytes(), wire);
         assert_eq!(parsed.id(), genesis_reward.id());
         assert!(parsed.verify().is_ok());
-        state.apply_block(5000, &parsed, &[]).unwrap();
+        state.apply_block(5000, Some(&parsed), &[]).unwrap();
         assert_eq!(state.total_issued(), 5000);
         let found = parsed
             .bundle
@@ -203,11 +213,39 @@ mod tests {
         let cmx = note.commitment().into();
         let path = state.witness(action_index, cmx).unwrap();
         assert_eq!(path.root(cmx), state.root());
+        let zero_fee_payment = ShieldedTx::transfer(
+            44,
+            &sender,
+            note,
+            state.witness(action_index, cmx).unwrap(),
+            pay_address,
+            3000,
+            0,
+        )
+        .unwrap();
+        let mut no_reward_fork = state.clone();
+        no_reward_fork
+            .apply_block(0, None, &[zero_fee_payment])
+            .unwrap();
+        assert_eq!(no_reward_fork.total_issued(), 5000);
+        assert_ne!(no_reward_fork.root(), state.root());
         let payment =
             ShieldedTx::transfer(44, &sender, note, path, pay_address, 3000, 100).unwrap();
         assert_eq!(payment.public_input, 0);
         assert_eq!(*payment.bundle.value_balance(), 100);
         let payment_wire = payment.to_bytes();
+        let mut verified_receipt = std::mem::MaybeUninit::<crate::ffi::ShieldedReceipt>::uninit();
+        let status = unsafe {
+            crate::ffi::eclipse_shielded_verify_esx1(
+                payment_wire.as_ptr(),
+                payment_wire.len(),
+                44,
+                verified_receipt.as_mut_ptr(),
+            )
+        };
+        assert_eq!(status, 0);
+        let verified_receipt = unsafe { verified_receipt.assume_init() };
+        assert_eq!(verified_receipt.flags, 0b11);
         let payment = ShieldedTx::from_bytes(&payment_wire).unwrap();
         assert!(payment.verify().is_ok());
         let received = payment
@@ -225,21 +263,25 @@ mod tests {
         let before = state.root();
         let mut fork = state.clone();
         assert!(fork
-            .apply_block(0, &doubled_fee_reward, &[payment.clone(), payment.clone()])
+            .apply_block(
+                0,
+                Some(&doubled_fee_reward),
+                &[payment.clone(), payment.clone()]
+            )
             .is_err());
         assert_eq!(fork.root(), before);
         let mut unrelated = ShieldedState::new(44);
         assert!(unrelated
-            .apply_block(0, &fee_reward, std::slice::from_ref(&payment))
+            .apply_block(0, Some(&fee_reward), std::slice::from_ref(&payment))
             .is_err());
         assert_eq!(unrelated.leaf_count(), 0);
         state
-            .apply_block(0, &fee_reward, std::slice::from_ref(&payment))
+            .apply_block(0, Some(&fee_reward), std::slice::from_ref(&payment))
             .unwrap();
         assert_eq!(state.total_issued(), 5000);
         assert_ne!(state.root(), before);
         let accepted_root = state.root();
-        assert!(state.apply_block(0, &fee_reward, &[payment]).is_err());
+        assert!(state.apply_block(0, Some(&fee_reward), &[payment]).is_err());
         assert_eq!(state.root(), accepted_root);
         assert_eq!(fork.root(), before);
     }
@@ -278,7 +320,12 @@ mod tests {
             .verify()
             .is_err());
         let mut state = ShieldedState::new(44);
-        assert!(state.apply_block(6, &tx, &[]).is_err());
+        assert!(state.apply_block(6, Some(&tx), &[]).is_err());
+        assert!(state.apply_block(5, None, &[]).is_err());
+        assert!(state.apply_block(0, Some(&tx), &[]).is_err());
+        assert_eq!(state.leaf_count(), 0);
+        state.apply_block(0, None, &[]).unwrap();
+        assert_eq!(state.total_issued(), 0);
         assert_eq!(state.leaf_count(), 0);
     }
 }

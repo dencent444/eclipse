@@ -7,6 +7,8 @@
 
 #define ECLIPSE_SHIELDED_MAX_ACTIONS 8u
 #define ECLIPSE_SHIELDED_MAX_WIRE_SIZE 32000u
+#define ECLIPSE_SHIELDED_FLAG_SPENDS_ENABLED 0x01u
+#define ECLIPSE_SHIELDED_FLAG_OUTPUTS_ENABLED 0x02u
 
 /* Fixed-layout C representation of the Rust verifier receipt. These public
  * values are enough to enforce network, fee, anchor, nullifier, and commitment
@@ -17,6 +19,8 @@ typedef struct {
     uint64_t public_input;
     int64_t value_balance;
     uint8_t action_count;
+    /* Orchard v2 wire flags. A shielded reward requires SPENDS_ENABLED clear. */
+    uint8_t flags;
     uint8_t anchor[32];
     uint8_t nullifiers[ECLIPSE_SHIELDED_MAX_ACTIONS][32];
     uint8_t commitments[ECLIPSE_SHIELDED_MAX_ACTIONS][32];

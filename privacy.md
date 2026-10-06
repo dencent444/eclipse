@@ -181,14 +181,18 @@ signed packet has a separate domain-separated SHA3-256 transaction ID.
 
 `ShieldedState` performs a branch-local atomic transition with historical
 roots, nullifier uniqueness, commitment append, and public supply accounting.
-For a transfer, `public_input=0` and `value_balance=fee`. For a reward, the
-node must calculate `subsidy + validated fees`, require an output-only proof,
-and match the packet's `public_input` exactly. The state currently keeps a
-complete in-memory tree with a 65,536-leaf developer limit. It is unsuitable
-for an unbounded network and does not persist across node restarts.
+For a transfer, `public_input=0` and `value_balance=fee`. When
+`subsidy + validated fees` is positive, the block requires an output-only
+reward proof whose `public_input` matches that total. When the total is zero,
+the block has no reward packet and `issue(0)` remains invalid. The state
+currently keeps a complete in-memory tree with a 65,536-leaf developer limit.
+It is unsuitable for an unbounded network and does not persist across node
+restarts.
 
 The optional C ABI (`ECLIPSE_BUILD_SHIELDED`) checks canonical bytes, proof,
-signatures, value balance, and network ID and returns only public fields.
+signatures, value balance, and network ID and returns only public fields,
+including the verified Orchard flag byte needed to reject spend-enabled
+rewards.
 It does **not** itself check a branch root, reserve nullifiers, or grant public
 issuance. These checks remain necessary when `ESX1` is integrated with a new
 block version and chain state. No mainnet or privacy guarantee follows from
